@@ -664,47 +664,134 @@ async function nfrSave(mid){
   }catch(e){ toast(esc(e.message), true); }
 }
 
-/* ---------- MVP2: AI-ассистент по стандарту (BR-48…50) ---------- */
+/* ---------- MVP2: AI-ассистент по стандарту (BR-48…50) — чат в стиле ChatGPT ---------- */
 const PROVIDER_RU = {'ai-buddy': 'AI-Buddy (корпоративная LLM)', 'local-rag': 'локальная база знаний (LLM не подключена)', 'none': ''};
+const CHAT_KEY = 'darch_chat_v1';
+let CHAT = [];            // [{role:'user'|'bot', text, provider, model, confidence, citations}]
+let CHAT_BUSY = false;
+
+const CHAT_SUGGESTIONS = [
+  ['Какие документы обязательны для проекта?', 'Матрица обязательных артефактов по типам проектов'],
+  ['Как генерируется ID техдолга?', 'Правило формирования AD/TD-идентификаторов'],
+  ['Что не является техническим долгом?', 'Границы понятия TD по стандарту'],
+  ['Когда идти к эксперту домена?', 'Сценарии обязательного ревью'],
+];
+
+function mdLite(src){
+  // безопасный мини-markdown: экранируем всё, потом ограниченные замены
+  let t = esc(src);
+  t = t.replace(/```([\s\S]*?)```/g, (m,c)=>`<pre class="chatcode"><code>${c.trim()}</code></pre>`);
+  t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  t = t.replace(/^#{2,4}\s+(.+)$/gm, '<b class="ch">$1</b>');
+  t = t.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/^(\s*)[·\-•]\s+(.+)$/gm, '$1• $2');   // буллеты → единый вид
+  return t;
+}
+
 async function viewAssistant(){
-  let st = {provider:'local-rag', kb_pages:'…'};
+  let st = {provider:'local-rag', kb_pages:'…', kb_chunks:''};
   try{ st = await api('/assistant/status'); }catch{}
+  try{ CHAT = JSON.parse(sessionStorage.getItem(CHAT_KEY) || '[]'); }catch{ CHAT = []; }
   const badge = st.provider === 'ai-buddy'
     ? `<span class="badge b-approved">● AI-Buddy · ${esc(st.model||'')}</span>`
     : `<span class="badge b-in_review">● fallback: локальная база знаний</span>`;
-  $('#view').innerHTML = `<h1>AI-ассистент по стандарту</h1>
-  <p class="mut">Генерация ответов корпоративной LLM (AI-Buddy) поверх базы знаний из реальных страниц
-  Confluence dats.tech. Ответы с цитатами; advisory-режим — ассистент ничего не меняет (BR-33).</p>
-  <div class="btnrow" style="margin:10px 0">${badge}
-    <span class="chip">база знаний: ${st.kb_pages} страниц · ${st.kb_chunks} чанков</span>
-    ${st.provider!=='ai-buddy'?`<span class="small mut">для LLM задайте AI_BUDDY_URL и AI_BUDDY_TOKEN</span>`:''}</div>
-  <div class="card" style="margin-top:6px">
-    <div style="display:flex;gap:8px"><input id="q" style="flex:1" placeholder="Например: какие ADR обязательны для старта? что считается техдолгом?"
-      onkeydown="if(event.key==='Enter')askAssistant()">
-      <button onclick="askAssistant()">Спросить</button></div>
-    <div id="a-out" style="margin-top:14px"></div>
+  $('#view').innerHTML = `
+  <div class="chat-wrap">
+    <div class="chat-head">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <b style="font-size:15px">AI-ассистент стандарта</b>${badge}
+        <span class="chip small">база знаний: ${st.kb_pages} стр · ${st.kb_chunks} чанков</span>
+      </div>
+      <button class="sec" onclick="chatNew()">＋ Новый чат</button>
+    </div>
+    <div class="chat-scroll" id="chat-scroll"><div class="chat-log" id="chat-log"></div></div>
+    <div class="composer">
+      <div class="composer-box">
+        <textarea id="q" rows="1" placeholder="Спросите про стандарт — артефакты, ревью, техдолг, fitness…"
+          onkeydown="chatKeydown(event)" oninput="chatAutogrow(this)"></textarea>
+        <button class="send-btn" id="send-btn" onclick="askAssistant()" title="Отправить (Enter)">↑</button>
+      </div>
+      <p class="small mut" style="text-align:center;margin-top:8px">
+        Advisory-режим (BR-33): ассистент ничего не меняет, решение за человеком.
+        Ответы генерируются по страницам стандарта, но могут содержать неточности — проверяйте по первоисточнику.</p>
+    </div>
   </div>`;
-  const suggestions = ['Какие документы обязательны для проекта?', 'Как генерируется ID техдолга?',
-                       'Что не является техническим долгом?', 'Когда идти к эксперту домена?'];
-  $('#a-out').innerHTML = `<p class="small mut">Попробуйте: ${suggestions.map(s=>`<a class="lnk" href="javascript:void askQ(${JSON.stringify(s).replace(/"/g,'&quot;')})">${esc(s)}</a>`).join(' · ')}</p>`;
+  renderChat();
+  $('#q').focus();
 }
-function askQ(q){ $('#q').value = q; askAssistant(); }
+
+function chatMsgHtml(m){
+  if(m.role === 'user')
+    return `<div class="msg user"><div class="bubble">${mdLite(m.text)}</div></div>`;
+  const cites = (m.citations || []).length ? `<div class="btnrow chat-cites">${m.citations.map(c =>
+    `<span class="chip">📄 <a class="lnk" href="${esc(c.url)}" target="_blank">${esc(c.title)}</a>
+     <span class="small mut">pageId=${c.page_id}</span></span>`).join('')}</div>` : '';
+  const meta = `<div class="btnrow chat-meta">
+      <span class="badge ${m.provider==='ai-buddy'?'b-approved':'b-in_review'} small-badge">${esc(PROVIDER_RU[m.provider]||m.provider||'')}</span>
+      ${m.model?`<span class="chip small">${esc(m.model)}</span>`:''}
+      <span class="small mut">уверенность ${Math.round((m.confidence||0)*100)}% · advisory</span></div>`;
+  return `<div class="msg bot"><div class="avatar">▲</div><div class="body">
+    <div class="bot-text">${mdLite(m.text)}</div>${cites}${meta}</div></div>`;
+}
+
+function chatEmptyHtml(){
+  return `<div class="chat-empty">
+    <div class="avatar big">▲</div>
+    <div class="greet">Чем помочь по стандарту?</div>
+    <p class="mut" style="text-align:center">Спрашивайте про Architecture Definition Set — отвечаю по реальным страницам Confluence dats.tech, с цитатами.</p>
+    <div class="sugg-grid">${CHAT_SUGGESTIONS.map(([q,d]) =>
+      `<button class="sugg" onclick="askQ(${JSON.stringify(q).replace(/"/g,'&quot;')})">
+        <b>${esc(q)}</b><span class="small mut">${esc(d)}</span></button>`).join('')}</div>
+  </div>`;
+}
+
+function renderChat(typing=false){
+  const log = $('#chat-log'); if(!log) return;
+  log.innerHTML = CHAT.length ? CHAT.map(chatMsgHtml).join('') : chatEmptyHtml();
+  if(typing){
+    log.insertAdjacentHTML('beforeend',
+      `<div class="msg bot" id="typing"><div class="avatar">▲</div><div class="body">
+       <div class="typing"><span></span><span></span><span></span></div></div></div>`);
+  }
+  const sc = $('#chat-scroll');
+  sc.scrollTop = (CHAT.length || typing) ? sc.scrollHeight : 0;
+}
+
+function chatNew(){
+  if(CHAT_BUSY) return;
+  CHAT = []; sessionStorage.removeItem(CHAT_KEY); renderChat(); $('#q').focus();
+}
+function chatKeydown(e){
+  if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); askAssistant(); }
+}
+function chatAutogrow(t){
+  t.style.height = 'auto';
+  t.style.height = Math.min(t.scrollHeight, 160) + 'px';
+}
+function askQ(q){ $('#q').value = q; chatAutogrow($('#q')); askAssistant(); }
+
 async function askAssistant(){
-  const question = $('#q').value.trim();
+  if(CHAT_BUSY) return;
+  const box = $('#q'); if(!box) return;
+  const question = box.value.trim();
   if(!question) return;
-  $('#a-out').innerHTML = '<p class="mut">Думаю над вопросом…</p>';
+  CHAT.push({role:'user', text:question});
+  box.value = ''; chatAutogrow(box);
+  CHAT_BUSY = true; $('#send-btn').disabled = true;
+  renderChat(true);
   try{
-    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question})});
-    $('#a-out').innerHTML = `
-      <div class="btnrow" style="margin-bottom:8px">
-        <span class="badge ${r.provider==='ai-buddy'?'b-approved':'b-in_review'}">${esc(PROVIDER_RU[r.provider]||r.provider)}</span>
-        ${r.model?`<span class="chip small">${esc(r.model)}</span>`:''}
-        <span class="small mut">уверенность: ${Math.round((r.confidence||0)*100)}% · advisory</span></div>
-      <div style="white-space:pre-wrap;line-height:1.55">${esc(r.answer)}</div>
-      ${r.citations&&r.citations.length?`<div class="btnrow" style="margin-top:10px">${r.citations.map(c=>
-        `<span class="chip">📄 <a class="lnk" href="${esc(c.url)}" target="_blank">${esc(c.title)}</a>
-         <span class="small mut">pageId=${c.page_id}</span></span>`).join('')}</div>`:''}`;
-  }catch(e){ toast(esc(e.message), true); $('#a-out').innerHTML = ''; }
+    const r = await api('/assistant', {method:'POST', body: JSON.stringify({
+      question,
+      history: CHAT.slice(0, -1).map(m => ({role: m.role === 'bot' ? 'assistant' : 'user',
+                                            content: m.text}))})});
+    CHAT.push({role:'bot', text:r.answer, provider:r.provider, model:r.model,
+               confidence:r.confidence, citations:r.citations});
+  }catch(e){
+    CHAT.push({role:'bot', text:`⚠ ${e.message}`, provider:'none', confidence:0});
+  }
+  sessionStorage.setItem(CHAT_KEY, JSON.stringify(CHAT.slice(-40)));
+  CHAT_BUSY = false; if($('#send-btn')) $('#send-btn').disabled = false;
+  renderChat();
 }
 
 /* ---------- ролевая модель (Доступ) ---------- */

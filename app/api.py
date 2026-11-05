@@ -630,7 +630,12 @@ def assistant(body=Body(...), user=Depends(current_user)):
     question = (body.get("question") or "").strip()
     if not question:
         raise HTTPException(400, "Нужен question")
-    r = kb.answer(question)
+    history = body.get("history") or []
+    if not isinstance(history, list):
+        raise HTTPException(400, "history должен быть списком сообщений")
+    clean = [{"role": m.get("role"), "content": (m.get("content") or "")[:2000]}
+             for m in history[-6:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    r = kb.answer(question, history=clean)
     r["mode"] = "advisory"   # BR-33: решение за человеком
     return r
 

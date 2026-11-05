@@ -104,8 +104,12 @@ SYSTEM_PROMPT = """Ты — ассистент архитектора по ко�
 4. Ты работаешь в advisory-режиме: только объясняешь стандарт, никаких действий."""
 
 
-def answer(question: str, k: int = 4) -> dict:
-    """Ответ ассистента: LLM по контексту из базы знаний (или fallback) + цитаты."""
+def answer(question: str, k: int = 4, history: list | None = None) -> dict:
+    """Ответ ассистента: LLM по контексту из базы знаний (или fallback) + цитаты.
+
+    history — предыдущий диалог [{role: user|assistant, content: str}]
+    для follow-up вопросов (используется только LLM-веткой).
+    """
     hits = retrieve(question, k)
     if not hits:
         return {"answer": "В базе знаний стандарта нет релевантного раздела. "
@@ -123,13 +127,17 @@ def answer(question: str, k: int = 4) -> dict:
                    + (f"\nРелевантный фрагмент: {best_sent}" if best_sent else ""))
     if llm.configured():
         try:
-            text = llm.chat([
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content":
+            msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+            # последний диалог (максимум 6 реплик) — для follow-up вопросов
+            for m in (history or [])[-6:]:
+                role, content = m.get("role"), (m.get("content") or "").strip()
+                if role in ("user", "assistant") and content:
+                    msgs.append({"role": role, "content": content[:2000]})
+            msgs.append({"role": "user", "content":
                     "Контекст из базы знаний стандарта:\n\n" + "\n\n".join(ctx)
                     + f"\n\nВопрос архитектора: {question}\n"
-                      "Ответь на вопрос строго по контексту."},
-            ])
+                      "Ответь на вопрос строго по контексту."})
+            text = llm.chat(msgs)
             return {"answer": text.strip(), "citations": citations,
                     "confidence": 0.9, "provider": "ai-buddy",
                     "model": llm.config()[2]}
