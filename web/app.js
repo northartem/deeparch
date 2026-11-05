@@ -628,13 +628,21 @@ async function nfrSave(mid){
   }catch(e){ toast(esc(e.message), true); }
 }
 
-/* ---------- MVP2: RAG-ассистент по стандарту (BR-48…50) ---------- */
+/* ---------- MVP2: AI-ассистент по стандарту (BR-48…50) ---------- */
+const PROVIDER_RU = {'ai-buddy': 'AI-Buddy (корпоративная LLM)', 'local-rag': 'локальная база знаний (LLM не подключена)', 'none': ''};
 async function viewAssistant(){
-  $('#view').innerHTML = `<h1>Ассистент по стандарту</h1>
-  <p class="mut">База знаний — реальные страницы Confluence dats.tech (Architecture Definition Set, self-check,
-  навигатор, регламенты техдолга). Ответы извлекающие, с цитатами; advisory-режим — ничего не меняет.
-  Контракт готов к подключению корпоративного AI-Buddy.</p>
-  <div class="card" style="margin-top:14px">
+  let st = {provider:'local-rag', kb_pages:'…'};
+  try{ st = await api('/assistant/status'); }catch{}
+  const badge = st.provider === 'ai-buddy'
+    ? `<span class="badge b-approved">● AI-Buddy · ${esc(st.model||'')}</span>`
+    : `<span class="badge b-in_review">● fallback: локальная база знаний</span>`;
+  $('#view').innerHTML = `<h1>AI-ассистент по стандарту</h1>
+  <p class="mut">Генерация ответов корпоративной LLM (AI-Buddy) поверх базы знаний из реальных страниц
+  Confluence dats.tech. Ответы с цитатами; advisory-режим — ассистент ничего не меняет (BR-33).</p>
+  <div class="btnrow" style="margin:10px 0">${badge}
+    <span class="chip">база знаний: ${st.kb_pages} страниц · ${st.kb_chunks} чанков</span>
+    ${st.provider!=='ai-buddy'?`<span class="small mut">для LLM задайте AI_BUDDY_URL и AI_BUDDY_TOKEN</span>`:''}</div>
+  <div class="card" style="margin-top:6px">
     <div style="display:flex;gap:8px"><input id="q" style="flex:1" placeholder="Например: какие ADR обязательны для старта? что считается техдолгом?"
       onkeydown="if(event.key==='Enter')askAssistant()">
       <button onclick="askAssistant()">Спросить</button></div>
@@ -648,13 +656,16 @@ function askQ(q){ $('#q').value = q; askAssistant(); }
 async function askAssistant(){
   const question = $('#q').value.trim();
   if(!question) return;
-  $('#a-out').innerHTML = '<p class="mut">Ищу в базе знаний…</p>';
+  $('#a-out').innerHTML = '<p class="mut">Думаю над вопросом…</p>';
   try{
     const r = await api('/assistant', {method:'POST', body: JSON.stringify({question})});
     $('#a-out').innerHTML = `
+      <div class="btnrow" style="margin-bottom:8px">
+        <span class="badge ${r.provider==='ai-buddy'?'b-approved':'b-in_review'}">${esc(PROVIDER_RU[r.provider]||r.provider)}</span>
+        ${r.model?`<span class="chip small">${esc(r.model)}</span>`:''}
+        <span class="small mut">уверенность: ${Math.round((r.confidence||0)*100)}% · advisory</span></div>
       <div style="white-space:pre-wrap;line-height:1.55">${esc(r.answer)}</div>
-      <p class="small mut" style="margin-top:10px">уверенность: ${Math.round(r.confidence*100)}%</p>
-      ${r.citations.length?`<div class="btnrow">${r.citations.map(c=>
+      ${r.citations&&r.citations.length?`<div class="btnrow" style="margin-top:10px">${r.citations.map(c=>
         `<span class="chip">📄 <a class="lnk" href="${esc(c.url)}" target="_blank">${esc(c.title)}</a>
          <span class="small mut">pageId=${c.page_id}</span></span>`).join('')}</div>`:''}`;
   }catch(e){ toast(esc(e.message), true); $('#a-out').innerHTML = ''; }

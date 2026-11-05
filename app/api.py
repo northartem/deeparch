@@ -630,7 +630,14 @@ def assistant(body=Body(...), user=Depends(current_user)):
     question = (body.get("question") or "").strip()
     if not question:
         raise HTTPException(400, "Нужен question")
-    return kb.answer(question)
+    r = kb.answer(question)
+    r["mode"] = "advisory"   # BR-33: решение за человеком
+    return r
+
+
+@router.get("/assistant/status")
+def assistant_status(user=Depends(current_user)):
+    return kb.status()
 
 
 # ---------- MVP2: NFR-валидация (BR-51…53) ----------
