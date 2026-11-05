@@ -67,6 +67,13 @@ def _service_facts(service_id: int, max_art: int = 400) -> str:
     lines = [f"Сервис: {svc['name']} ({svc['code']}), домен: {svc['domain'] or '—'}, "
              f"тип проекта: {svc['project_type']}, жизненный цикл: {svc['lifecycle']}, "
              f"владелец: {svc['owner'] or '—'}, архитектор: {svc['architect'] or '—'}."]
+    # входящие требования — исходник, из которого проектируется архитектура
+    reqs = q("SELECT req_type, ext_id, text FROM requirements WHERE service_id=? "
+             "ORDER BY req_type, id LIMIT 20", (service_id,))
+    if reqs:
+        lines.append("Требования, на основе которых проектируется архитектура:")
+        lines += [f"- {r['ext_id']} ({'НФТ' if r['req_type'] == 'nonfunc' else 'ФТ'}): {r['text']}"
+                  for r in reqs]
     if comps:
         lines.append("Компоненты: " + "; ".join(
             f"{c['name']} ({c['kind']}, {c['status']})" for c in comps) + ".")

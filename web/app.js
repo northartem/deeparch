@@ -153,7 +153,10 @@ let SERVICE = null;
 async function viewService(id, tab='card'){
   const s = await api('/services/'+id); SERVICE = s;
   const active = tab||'card';
-  const tabs = [...TABS, ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')],
+  const tabs = [...TABS.slice(0, 1),
+    ['reqs', 'Требования' + (s.requirements?.length ? ` (${s.requirements.length})` : '')],
+    ...TABS.slice(1),
+    ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')],
     ['fitness', 'Fitness'], ['nfr', 'NFR']];
   $('#view').innerHTML = `
   <p class="small"><a class="lnk" href="#/services">← Реестр сервисов</a></p>
@@ -167,7 +170,7 @@ async function viewService(id, tab='card'){
   </div>
   <div class="tabs">${tabs.map(([k,t])=>`<a class="${k===active?'act':''}" href="#/service/${id}/${k}">${t}</a>`).join('')}</div>
   <div id="tabbody"></div>`;
-  ({card:tabCard, artifacts:tabArtifacts, diagrams:tabDiagrams, check:tabCheck, review:tabReview,
+  ({card:tabCard, reqs:tabReqs, artifacts:tabArtifacts, diagrams:tabDiagrams, check:tabCheck, review:tabReview,
     components:tabComponents, debt:tabDebt, fitness:tabFitness, nfr:tabNfr}[active])(s);
 }
 
@@ -691,6 +694,155 @@ async function nfrSave(mid){
     const r = await api(`/nfr/${mid}`, {method:'PATCH', body: JSON.stringify({actual_value:v===''?null:+v})});
     toast(`Факт сохранён · вердикт сервиса: ${r.verdict}`); render();
   }catch(e){ toast(esc(e.message), true); }
+}
+
+/* ---------- Требования (ФТ/НФТ): вход в архитектурную работу ---------- */
+const REQ_TYPE_BADGE = {func: 'b-desired', nonfunc: 'b-mandatory'};
+const REQ_TYPE_RU = {func: 'ФТ', nonfunc: 'НФТ'};
+const REQ_STATUS_RU = {new: 'новое', in_work: 'в работе', covered: 'покрыто'};
+let REQS_PREVIEW = [];   // разобранный документ на подтверждении импорта
+
+function artTitle(kind){
+  const a = (S.standard.artifacts || []).find(x => x.kind === kind);
+  return a ? a.title : kind;
+}
+
+function tabReqs(s){
+  const rs = s.requirements || [];
+  const nF = rs.filter(r => r.req_type === 'func').length, nN = rs.length - nF;
+  const uncovered = rs.filter(r => !(r.covered_by || []).length).length;
+  $('#tabbody').innerHTML = `<div class="grid g2" style="align-items:start">
+  <div class="card">
+    <h2 style="margin-top:0">Вход: требования к сервису</h2>
+    <p class="small mut">Архитектурная работа начинается с требований. Вставьте документ
+    с бизнес- (ФТ) и нефункциональными (НФТ) требованиями — AI-Buddy разберёт его на
+    отдельные требования (advisory, вы подтверждаете импорт). Далее: AI-черновики
+    артефактов проектируются <b>с учётом этих требований</b>, НФТ переносятся в
+    NFR profile, а покрытие (упоминание ФТ-N в артефактах) показывает, что ни одно
+    требование не потерялось.</p>
+    <div class="btnrow">
+      <button class="cya" onclick="reqNfrDraft(${s.id}, this)">⇥ Сгенерировать NFR profile из НФТ</button>
+      <span class="small mut">${nF} ФТ · ${nN} НФТ${uncovered?` · <b style="color:var(--bad)">не покрыто: ${uncovered}</b>`:''}</span>
+    </div>
+    <div style="margin:12px 0 6px"><button class="sec" onclick="reqToggleParse()">🧠 Вставить документ требований</button></div>
+    <div id="req-parse" style="display:none">
+      <textarea id="req-doc" rows="8" style="width:100%"
+        placeholder="Вставьте текст ФТ/НФТ из Confluence, Jira или документа…"></textarea>
+      <div class="btnrow"><button onclick="reqParse(${s.id})">🧠 Разобрать документ</button>
+      <span class="small mut" id="req-parse-note"></span></div>
+      <div id="req-preview"></div>
+    </div>
+    <label style="margin-top:12px">Добавить вручную</label>
+    <div class="grid g2">
+      <select id="req-type"><option value="func">ФТ — функция</option><option value="nonfunc">НФТ — качество</option></select>
+      <input id="req-src" placeholder="Источник: Confluence / Jira (ссылка)">
+    </div>
+    <textarea id="req-text" rows="2" style="width:100%;margin-top:6px" placeholder="Текст требования"></textarea>
+    <div class="btnrow"><button onclick="reqAdd(${s.id})">＋ Добавить требование</button></div>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Реестр требований</h2>
+    ${rs.length ? `<table><tr><th>ID</th><th>Требование</th><th>Статус</th><th>Покрытие</th><th></th></tr>
+    ${rs.map(r => `<tr>
+      <td><span class="badge ${REQ_TYPE_BADGE[r.req_type]}">${REQ_TYPE_RU[r.req_type]}</span>
+          <div class="small mut" style="margin-top:2px"><b>${esc(r.ext_id||'')}</b>${r.source_url?`<br><a class="lnk" href="${esc(r.source_url)}" target="_blank">источник ↗</a>`:''}</div></td>
+      <td style="max-width:340px">${esc(r.text)}</td>
+      <td><select onchange="reqStatus(${r.id}, this.value)">
+        ${['new','in_work','covered'].map(st => `<option value="${st}" ${st===r.status?'selected':''}>${REQ_STATUS_RU[st]}</option>`).join('')}
+      </select></td>
+      <td>${(r.covered_by||[]).length
+        ? r.covered_by.map(k => `<span class="badge b-approved" title="${esc(artTitle(k))}">${esc(k)}</span>`).join(' ')
+        : '<span class="badge b-N">не покрыто</span>'}</td>
+      <td><button class="sec" onclick="reqDel(${r.id}, ${s.id})" title="Удалить">✕</button></td></tr>`).join('')}
+    </table>` : '<p class="mut">Требований пока нет — вставьте документ или добавьте вручную. Затем откройте «Артефакты»: AI-черновик учтёт требования.</p>'}
+  </div></div>`;
+}
+
+function reqToggleParse(){
+  const el = document.getElementById('req-parse');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function reqParse(sid){
+  const text = document.getElementById('req-doc').value.trim();
+  if(!text) return toast('Вставьте текст документа', true);
+  const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('Разобрать документ'));
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Разбираю…'; }
+  try{
+    const r = await api(`/services/${sid}/requirements/parse`,
+      {method:'POST', body: JSON.stringify({text, model: chatModelSel()})});
+    REQS_PREVIEW = r.items;
+    document.getElementById('req-parse-note').textContent =
+      r.provider === 'ai-buddy' ? 'разобрано AI-Buddy' : 'простой разбор по строкам (LLM недоступна)';
+    if(!r.items.length) toast('Требования в документе не найдены', true);
+    reqPreviewRender(sid);
+  }catch(e){ toast(esc(e.message), true); }
+  if(btn){ btn.disabled = false; btn.textContent = '🧠 Разобрать документ'; }
+}
+
+function reqPreviewRender(sid){
+  const box = document.getElementById('req-preview');
+  if(!REQS_PREVIEW.length){ box.innerHTML = ''; return; }
+  box.innerHTML = `<p class="small mut" style="margin:10px 0 4px">Проверьте разбор — отметьте и поправьте, что импортировать:</p>
+  <table><tr><th></th><th>Тип</th><th>Требование</th></tr>
+  ${REQS_PREVIEW.map((it,i) => `<tr>
+    <td><input type="checkbox" id="rp-c${i}" checked></td>
+    <td><select id="rp-t${i}">
+      <option value="func" ${it.req_type==='func'?'selected':''}>ФТ</option>
+      <option value="nonfunc" ${it.req_type==='nonfunc'?'selected':''}>НФТ</option></select></td>
+    <td><input id="rp-x${i}" value="${esc(it.text)}" style="width:100%"></td></tr>`).join('')}
+  </table>
+  <div class="btnrow"><button onclick="reqImport(${sid})">⇣ Импортировать в сервис</button></div>`;
+}
+
+async function reqImport(sid){
+  const items = REQS_PREVIEW.map((it, i) => {
+    if(!document.getElementById(`rp-c${i}`).checked) return null;
+    return {req_type: document.getElementById(`rp-t${i}`).value,
+            text: document.getElementById(`rp-x${i}`).value};
+  }).filter(Boolean);
+  if(!items.length) return toast('Ничего не отмечено', true);
+  try{
+    const r = await api(`/services/${sid}/requirements/import`,
+      {method:'POST', body: JSON.stringify({items, source_url: document.getElementById('req-src').value.trim()})});
+    REQS_PREVIEW = [];
+    toast(`Импортировано требований: <b>${r.created.length}</b> — теперь AI-черновики артефактов учитывают их`);
+    viewService(sid, 'reqs');
+  }catch(e){ toast(esc(e.message), true); }
+}
+
+async function reqAdd(sid){
+  const text = document.getElementById('req-text').value.trim();
+  if(!text) return toast('Введите текст требования', true);
+  try{
+    await api(`/services/${sid}/requirements`, {method:'POST', body: JSON.stringify({
+      req_type: document.getElementById('req-type').value, text,
+      source_url: document.getElementById('req-src').value.trim()})});
+    viewService(sid, 'reqs');
+  }catch(e){ toast(esc(e.message), true); }
+}
+
+async function reqStatus(rid, status){
+  try{ await api(`/requirements/${rid}`, {method:'PATCH', body: JSON.stringify({status})}); }
+  catch(e){ toast(esc(e.message), true); }
+}
+
+async function reqDel(rid, sid){
+  try{
+    await api(`/requirements/${rid}`, {method:'DELETE'});
+    viewService(sid, 'reqs');
+  }catch(e){ toast(esc(e.message), true); }
+}
+
+async function reqNfrDraft(sid, btn){
+  btn.disabled = true; btn.textContent = '⏳ Генерирую…';
+  try{
+    const r = await api(`/services/${sid}/nfr/from-requirements`, {method:'POST'});
+    await viewService(sid, 'artifacts');
+    const el = document.getElementById('a-nfr_security');
+    if(el) el.value = r.content_md;
+    toast(`NFR profile из НФТ (${r.provider === 'ai-buddy' ? esc(r.model||'AI-Buddy') : 'перенос без LLM'}) вставлен в артефакт — <b>требует подтверждения автора</b>`);
+  }catch(e){ toast(esc(e.message), true); btn.disabled = false; btn.textContent = '⇥ Сгенерировать NFR profile из НФТ'; }
 }
 
 /* ---------- MVP2: AI-ассистент по стандарту (BR-48…50) — чат в стиле ChatGPT ---------- */

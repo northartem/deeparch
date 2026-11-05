@@ -88,6 +88,11 @@ GET/POST /api/components                 → каталог компоненто
 POST /api/services/{id}/components       → подключить компонент
 POST /api/ai/draft | /api/ai/precheck    → AI-черновик (AI-Buddy + KB, fallback шаблон) / AI Gate (advisory)
 POST /api/services/{sid}/artifacts/scaffold → скелеты обязательных артефактов (которых ещё нет)
+GET/POST /api/services/{sid}/requirements   → реестр ФТ/НФТ на сервисе (трассировка covered_by)
+POST /api/services/{sid}/requirements/parse → AI-разбор вставленного документа на требования
+POST /api/services/{sid}/requirements/import → импорт разобранного (номера ФТ-N/НФТ-N)
+PATCH/DELETE /api/requirements/{id}         → правка/удаление требования
+POST /api/services/{sid}/nfr/from-requirements → черновик NFR profile из НФТ
 POST /api/integrations/backstage/import  → импорт из каталога (dry-run)
 GET  /api/integrations/services/{id}/catalog-export → catalog-info.yaml
 GET/POST /api/debts … /api/debts/{id}/status → реестр техдолга (BR-38…40)
@@ -110,7 +115,7 @@ GET  /api/dashboard | /api/audit
 
 ## Дорожная карта (следующие шаги)
 
-1. **AI-Buddy для остальных AI-сценариев** — AI-черновики уже ходят в корпоративную LLM (`app/ai.py` → `app/llm.py`, `reasoning_effort=low`); AI Gate (BR-29) пока на mock-эвристиках за тем же контрактом.
+1. **AI-Buddy для остальных AI-сценариев** — AI-черновики и разбор требований уже ходят в корпоративную LLM (`app/ai.py`, `app/reqs.py` → `app/llm.py`, `reasoning_effort=low`); AI Gate (BR-29) пока на mock-эвристиках за тем же контрактом.
 2. **Real Confluence API** — прямая запись XHTML на страницу реестра долга (сейчас — копипаста через UI).
 3. **Backstage-коннектор** — реальный `catalog-info.yaml` из GitLab вместо mock.
 4. **DataGerry-коннектор** — ObjectTypes + матрица доступов (контур ИБ).

@@ -139,6 +139,11 @@ def _service_context(service_id: int) -> str | None:
              f"домен: {svc['domain'] or '—'}, тип проекта: {svc['project_type']}, "
              f"жизненный цикл: {svc['lifecycle']}, владелец: {svc['owner'] or '—'}, "
              f"архитектор: {svc['architect'] or '—'}."]
+    reqs = q("SELECT req_type, ext_id, text FROM requirements WHERE service_id=? "
+             "ORDER BY req_type, id LIMIT 15", (service_id,))
+    if reqs:
+        lines.append("Требования сервиса (ФТ — функции, НФТ — измеримые качества):")
+        lines += [f"- {r['ext_id']}: {r['text'][:160]}" for r in reqs]
     if comps:
         lines.append("Компоненты: " + "; ".join(
             f"{c['name']} ({c['kind']}, {c['status']})" for c in comps) + ".")

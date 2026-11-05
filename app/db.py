@@ -192,6 +192,18 @@ CREATE TABLE IF NOT EXISTS fitness_runs (    -- MVP2 BR-42: прогоны ав�
   created_by TEXT, created_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS requirements (    -- ФТ/НФТ, приходящие архитектору на сервис
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  service_id INTEGER NOT NULL REFERENCES services(id),
+  req_type TEXT NOT NULL DEFAULT 'func',     -- func (ФТ) | nonfunc (НФТ)
+  ext_id TEXT,                               -- внешний номер, напр. ФТ-7 / НФТ-2
+  text TEXT NOT NULL,
+  source_url TEXT,
+  status TEXT NOT NULL DEFAULT 'new',        -- new | in_work | covered
+  created_at REAL,
+  updated_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS nfr_metrics (     -- MVP2 BR-51…53: цели vs факты
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   service_id INTEGER NOT NULL REFERENCES services(id),

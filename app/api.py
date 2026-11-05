@@ -12,7 +12,7 @@ from .standards import (STANDARD_NAME, STANDARD_REF, ARTIFACT_KINDS, CHECKLIST_I
                         COMPONENT_KINDS, COMPONENT_STATUSES,
                         DEBT_TYPES, DEBT_STATUSES, DEBT_RISKS, DEBT_PRIORITIES)
 from .debts import gen_debt_id
-from . import ai, integrations, fitness, factory, nfr, kb, llm
+from . import ai, integrations, fitness, factory, nfr, kb, llm, reqs
 from .seed import seed, demo_vision_template
 
 router = APIRouter(prefix="/api")
@@ -122,6 +122,10 @@ def get_service(sid: int, user=Depends(current_user)):
     svc["reviews"] = q("SELECT * FROM reviews WHERE service_id=? ORDER BY requested_at DESC", (sid,))
     svc["components"] = q("""SELECT c.* FROM components c JOIN service_components sc ON sc.component_id=c.id
                               WHERE sc.service_id=?""", (sid,))
+    svc["requirements"] = reqs.list_for(sid)             # ФТ/НФТ на сервисе
+    _cov = reqs.coverage(sid)                            # покрытие: номер в артефактах
+    for _r in svc["requirements"]:
+        _r["covered_by"] = _cov.get(_r["id"], [])
     last = q1("SELECT answers FROM checklist_runs WHERE service_id=? ORDER BY created_at DESC LIMIT 1", (sid,))
     svc["last_answers"] = json.loads(last["answers"]) if last and last["answers"] else []
     svc["nfr"] = nfr.validate(sid)                       # MVP2 BR-51…53
@@ -327,6 +331,118 @@ def artifacts_scaffold(sid: int, user=Depends(current_user)):
     if created:
         audit(user, "artifacts_scaffold", f"service:{sid}", f"kinds:{','.join(created)}")
     return {"created": created}
+
+
+# ---------- Требования (ФТ/НФТ): вход в архитектурную работу ----------
+
+@router.get("/services/{sid}/requirements")
+def requirements_list(sid: int, user=Depends(current_user)):
+    items = reqs.list_for(sid)
+    cov = reqs.coverage(sid)
+    for r in items:
+        r["covered_by"] = cov.get(r["id"], [])
+    return {"requirements": items}
+
+
+@router.post("/services/{sid}/requirements")
+def requirement_add(sid: int, body=Body(...), user=Depends(current_user)):
+    """Ручное добавление одного требования."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "Нужен текст требования")
+    typ = body.get("req_type") if body.get("req_type") in ("func", "nonfunc") else "func"
+    created = reqs.import_items(sid, [{"req_type": typ, "text": text,
+                                       "ext_id": (body.get("ext_id") or "").strip() or None}],
+                                source_url=(body.get("source_url") or "").strip())
+    audit(user, "requirement_add", f"service:{sid}", created[0]["ext_id"])
+    return created[0]
+
+
+@router.patch("/requirements/{rid}")
+def requirement_patch(rid: int, body=Body(...), user=Depends(current_user)):
+    r = q1("SELECT * FROM requirements WHERE id=?", (rid,))
+    if not r:
+        raise HTTPException(404, "Требование не найдено")
+    svc = q1("SELECT * FROM services WHERE id=?", (r["service_id"],))
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    sets, args = [], []
+    if "text" in body and (body["text"] or "").strip():
+        sets.append("text=?"); args.append(body["text"].strip())
+    if body.get("req_type") in ("func", "nonfunc"):
+        sets.append("req_type=?"); args.append(body["req_type"])
+    if body.get("status") in ("new", "in_work", "covered"):
+        sets.append("status=?"); args.append(body["status"])
+    if "source_url" in body:
+        sets.append("source_url=?"); args.append((body["source_url"] or "").strip())
+    if not sets:
+        raise HTTPException(400, "Нечего обновлять")
+    sets += ["updated_at=?"]; args += [now(), rid]
+    exec(f"UPDATE requirements SET {', '.join(sets)} WHERE id=?", args)
+    audit(user, "requirement_update", f"requirement:{rid}", ",".join(s[:-2] for s in sets[:-1]))
+    return q1("SELECT * FROM requirements WHERE id=?", (rid,))
+
+
+@router.delete("/requirements/{rid}")
+def requirement_delete(rid: int, user=Depends(current_user)):
+    r = q1("SELECT * FROM requirements WHERE id=?", (rid,))
+    if not r:
+        raise HTTPException(404, "Требование не найдено")
+    svc = q1("SELECT * FROM services WHERE id=?", (r["service_id"],))
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    exec("DELETE FROM requirements WHERE id=?", (rid,))
+    audit(user, "requirement_delete", f"requirement:{rid}", r["ext_id"])
+    return {"ok": True}
+
+
+@router.post("/services/{sid}/requirements/parse")
+def requirements_parse(sid: int, body=Body(...), user=Depends(current_user)):
+    """AI-разбор вставленного документа на требования (без сохранения — на подтверждение)."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    r = reqs.parse_document(body.get("text") or "", model=(body.get("model") or "").strip())
+    audit(user, "requirements_parse", f"service:{sid}", f"provider:{r['provider']} items:{len(r['items'])}")
+    return r
+
+
+@router.post("/services/{sid}/requirements/import")
+def requirements_import(sid: int, body=Body(...), user=Depends(current_user)):
+    """Сохранение разобранных (и при желании поправленных) требований."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    items = body.get("items") or []
+    if not isinstance(items, list) or not items:
+        raise HTTPException(400, "Список requirements пуст")
+    created = reqs.import_items(sid, items, source_url=(body.get("source_url") or "").strip())
+    audit(user, "requirements_import", f"service:{sid}", f"n:{len(created)}")
+    return {"created": created}
+
+
+@router.post("/services/{sid}/nfr/from-requirements")
+def nfr_from_requirements(sid: int, user=Depends(current_user)):
+    """Черновик NFR & Security profile из НФТ-требований (возвращает markdown на подтверждение)."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    r = reqs.nfr_from_requirements(sid)
+    if not r:
+        raise HTTPException(400, "НФТ-требований нет — добавьте их в разделе «Требования»")
+    audit(user, "nfr_from_requirements", f"service:{sid}", f"provider:{r['provider']}")
+    return r
 
 
 @router.post("/ai/precheck")
