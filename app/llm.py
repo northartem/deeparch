@@ -74,6 +74,34 @@ class LLMError(Exception):
     pass
 
 
+def list_models(url: str = "", token: str = "") -> dict:
+    """Список моделей прокси: GET {url}/models (OpenAI-совместимый).
+
+    Значения из формы приоритетнее сохранённых (как в test_connection).
+    """
+    cur_url, cur_token, _ = config()
+    eff_url = (url or "").strip() or cur_url
+    eff_token = (token or "").strip() or cur_token
+    if not (eff_url and eff_token):
+        return {"ok": False, "detail": "Не задан URL или токен — заполните поля формы",
+                "models": []}
+    try:
+        r = httpx.get(f"{eff_url.rstrip('/')}/models",
+                      headers={"Authorization": f"Bearer {eff_token}"}, timeout=TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        ids = sorted({m.get("id") for m in data.get("data", []) if m.get("id")})
+        return {"ok": True, "detail": f"доступно моделей: {len(ids)}", "models": ids}
+    except httpx.HTTPStatusError as e:
+        body = e.response.text[:200]
+        return {"ok": False, "detail": f"HTTP {e.response.status_code}: {body}", "models": []}
+    except httpx.HTTPError as e:
+        return {"ok": False, "detail": f"LLM недоступна: {e.__class__.__name__}: {e}",
+                "models": []}
+    except ValueError as e:
+        return {"ok": False, "detail": f"Неожиданный формат ответа: {e}", "models": []}
+
+
 def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900) -> str:
     """messages: [{"role": "system"|"user"|"assistant", "content": str}] → текст ответа."""
     url, token, model = config()
@@ -90,6 +118,8 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900) 
         r.raise_for_status()
         data = r.json()
         return data["choices"][0]["message"]["content"]
+    except httpx.HTTPStatusError as e:
+        raise LLMError(f"HTTP {e.response.status_code}: {e.response.text[:200]}") from e
     except httpx.HTTPError as e:
         raise LLMError(f"AI-Buddy недоступен: {e.__class__.__name__}") from e
     except (KeyError, IndexError, ValueError) as e:
@@ -126,6 +156,10 @@ def test_connection(url: str = "", token: str = "", model: str = "") -> dict:
                 "latency_ms": int((time.monotonic() - t0) * 1000)}
     except LLMError as e:
         return {"ok": False, "detail": str(e),
+                "latency_ms": int((time.monotonic() - t0) * 1000)}
+    except httpx.HTTPStatusError as e:
+        body = e.response.text[:300]
+        return {"ok": False, "detail": f"HTTP {e.response.status_code}: {body}",
                 "latency_ms": int((time.monotonic() - t0) * 1000)}
     except httpx.HTTPError as e:
         return {"ok": False, "detail": f"LLM недоступна: {e.__class__.__name__}: {e}",

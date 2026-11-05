@@ -797,10 +797,12 @@ async function viewAdmin(){
       <div id="llm-form" style="margin-top:8px">
         <label>Base URL</label><input id="llm-url" placeholder="https://aibuddy.internal.company/v1">
         <div class="grid g2"><div><label>Токен</label><input id="llm-token" type="password" placeholder="сервисный токен"></div>
-        <div><label>Модель</label><input id="llm-model" placeholder="ai-buddy-large"></div></div>
+        <div><label>Модель</label><input id="llm-model" list="llm-models" placeholder="ai-buddy-large"></div></div>
         <div class="btnrow"><button onclick="llmSave()">Подключить</button>
           <button class="sec" onclick="llmTest()">Проверить связь</button>
+          <button class="sec" onclick="llmModels()">Модели</button>
           <button class="sec" onclick="llmRemove()">Отключить</button></div>
+        <datalist id="llm-models"></datalist>
       </div>
       <div id="llm-res" style="margin-top:8px"></div>
     </div>
@@ -853,8 +855,25 @@ async function llmTest(){
       <span class="small mut">${esc(r.detail)} · ${r.latency_ms} мс</span></div>`;
   }catch(e){ toast(esc(e.message), true); $('#llm-res').innerHTML = ''; }
 }
-async function llmRemove(){
+async function llmModels(){
+  $('#llm-res').innerHTML = '<p class="small mut">Запрашиваю список моделей…</p>';
   try{
+    const r = await api('/admin/llm/models', {method:'POST', body: JSON.stringify({
+      url:$('#llm-url').value, token:$('#llm-token').value})});
+    if(r.ok){
+      $('#llm-models').innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join('');
+      $('#llm-res').innerHTML = `<div class="btnrow" style="flex-wrap:wrap">
+        <span class="badge b-approved">✔ ${r.models.length} моделей доступно</span>
+        ${r.models.map(m => `<span class="chip small" style="cursor:pointer" title="выбрать" onclick="document.getElementById('llm-model').value='${esc(m)}'">${esc(m)}</span>`).join('')}
+      </div><p class="small mut">Кликните по модели, чтобы подставить её в поле «Модель».</p>`;
+    } else {
+      $('#llm-res').innerHTML = `<div class="btnrow">
+        <span class="badge b-changes_requested">✖ список недоступен</span>
+        <span class="small mut">${esc(r.detail)}</span></div>`;
+    }
+  }catch(e){ toast(esc(e.message), true); $('#llm-res').innerHTML = ''; }
+}
+async function llmRemove(){  try{
     await api('/admin/llm/remove', {method:'POST'});
     $('#llm-res').innerHTML = '';
     toast('LLM отключена, настройки удалены'); renderLlm();

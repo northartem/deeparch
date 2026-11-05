@@ -676,6 +676,14 @@ def llm_test(body=Body(None), user=Depends(current_user)):
     return r
 
 
+@router.post("/admin/llm/models")
+def llm_models(body=Body(None), user=Depends(current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Настройки LLM — только admin")
+    body = body or {}
+    return llm.list_models(url=body.get("url") or "", token=body.get("token") or "")
+
+
 @router.post("/admin/llm/remove")
 def llm_remove(user=Depends(current_user)):
     if user["role"] != "admin":
