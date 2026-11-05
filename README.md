@@ -98,7 +98,9 @@ POST /api/assistant                      → AI-ассистент с цитат
 POST /api/assistant/stream               → стриминг ответа (SSE: meta → delta* → done)
 GET  /api/assistant/status               → провайдер LLM + размер базы знаний
 GET  /api/assistant/models               → список моделей для селектора в чате
-GET/DELETE /api/assistant/history        → история чата пользователя (40 последних / очистка)
+GET  /api/assistant/chats                → список чатов пользователя (левая панель)
+DELETE /api/assistant/chats/{id}         → удалить чат с историей
+GET/DELETE /api/assistant/history        → сообщения чата (?chat_id=) / очистка всех чатов
 POST /api/services/{id}/nfr/extract      → извлечь NFR-цели из артефакта
 PATCH /api/nfr/{mid}                     → факт по метрике + вердикт
 POST /api/integrations/confluence/export|import → XHTML экспорт / markdown импорт долга
