@@ -167,18 +167,23 @@ textarea.diagcode{min-height:180px;font-size:12px}
 
 /* ---------- chat (AI-ассистент, стиль ChatGPT) ---------- */
 main:has(.chat-wrap){max-width:none}
-.chat-shell{display:flex;gap:16px;max-width:1080px;margin:0 auto;
+.chat-shell{display:flex;gap:22px;max-width:1080px;margin:0 auto;
   height:calc(100vh - 148px)}
-.chat-side{flex:0 0 230px;display:flex;flex-direction:column;gap:10px;min-height:0}
-.chat-new-btn{border:1px solid var(--line-strong);background:var(--surface);
-  color:var(--txt);border-radius:12px;padding:9px 12px;font:inherit;font-size:13.5px;
-  font-weight:600;cursor:pointer;transition:background .12s}
-.chat-new-btn:hover{background:var(--surface2)}
-.chat-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:2px;min-height:0}
+.chat-side{flex:0 0 244px;display:flex;flex-direction:column;gap:10px;min-height:0;
+  background:var(--surface2);border:1px solid var(--line);border-radius:16px;
+  padding:12px 10px}
+.chat-side-label{color:var(--mut);font-size:11px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.6px;padding:0 6px}
+.chat-new-btn{border:none;background:var(--surface);color:var(--txt);
+  border-radius:10px;padding:9px 12px;font:inherit;font-size:13.5px;font-weight:600;
+  cursor:pointer;box-shadow:var(--shadow-sm);transition:background .12s}
+.chat-new-btn:hover{background:#fff}
+.chat-list{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:3px;min-height:0}
 .chat-item{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:10px;
-  cursor:pointer;font-size:13px}
-.chat-item:hover{background:var(--surface2)}
-.chat-item.active{background:var(--surface);box-shadow:var(--shadow-sm)}
+  border:1px solid transparent;cursor:pointer;font-size:13px}
+.chat-item:hover{background:rgba(255,255,255,.65)}
+.chat-item.active{background:var(--surface);border-color:var(--line);
+  box-shadow:var(--shadow-sm)}
 .chat-item-title{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chat-item-del{flex:0 0 18px;text-align:center;opacity:0;cursor:pointer;
   font-size:12px;color:#b91c1c;transition:opacity .12s}

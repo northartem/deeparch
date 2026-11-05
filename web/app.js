@@ -756,6 +756,7 @@ async function viewAssistant(){
   <div class="chat-shell">
     <aside class="chat-side">
       <button class="chat-new-btn" onclick="chatNew()">＋ Новый чат</button>
+      <div class="chat-side-label">История</div>
       <div class="chat-list" id="chat-list"></div>
     </aside>
     <div class="chat-wrap">
