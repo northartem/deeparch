@@ -96,15 +96,40 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900) 
         raise LLMError(f"Неожиданный формат ответа AI-Buddy: {e}") from e
 
 
-def test_connection() -> dict:
-    """Проверка связи из админ-панели: минимальный запрос к LLM."""
+def test_connection(url: str = "", token: str = "", model: str = "") -> dict:
+    """Проверка связи из админ-панели.
+
+    Значения из формы админ-панели имеют приоритет: можно проверить связь
+    до сохранения. Пустой token = использовать сохранённый (если есть).
+    """
     import time
+    cur_url, cur_token, cur_model = config()
+    eff_url = (url or "").strip() or cur_url
+    eff_token = (token or "").strip() or cur_token
+    eff_model = (model or "").strip() or cur_model
     t0 = time.monotonic()
     try:
-        text = chat([{"role": "user", "content": "Ответь одним словом: ping"}],
-                    temperature=0.0, max_tokens=16)
+        if not (eff_url and eff_token):
+            raise LLMError("Не задан URL или токен — заполните поля формы "
+                           "(проверка использует значения из формы, сохранение кнопкой «Подключить»)")
+        r = httpx.post(
+            f"{eff_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {eff_token}",
+                     "Content-Type": "application/json"},
+            json={"model": eff_model,
+                  "messages": [{"role": "user", "content": "Ответь одним словом: ping"}],
+                  "temperature": 0.0, "max_tokens": 16},
+            timeout=TIMEOUT)
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"]
         return {"ok": True, "detail": f"LLM ответила: {text.strip()[:80]!r}",
                 "latency_ms": int((time.monotonic() - t0) * 1000)}
     except LLMError as e:
         return {"ok": False, "detail": str(e),
+                "latency_ms": int((time.monotonic() - t0) * 1000)}
+    except httpx.HTTPError as e:
+        return {"ok": False, "detail": f"LLM недоступна: {e.__class__.__name__}: {e}",
+                "latency_ms": int((time.monotonic() - t0) * 1000)}
+    except (KeyError, IndexError, ValueError) as e:
+        return {"ok": False, "detail": f"Неожиданный формат ответа: {e}",
                 "latency_ms": int((time.monotonic() - t0) * 1000)}

@@ -665,10 +665,13 @@ def llm_save(body=Body(...), user=Depends(current_user)):
 
 
 @router.post("/admin/llm/test")
-def llm_test(user=Depends(current_user)):
+def llm_test(body=Body(None), user=Depends(current_user)):
     if user["role"] != "admin":
         raise HTTPException(403, "Настройки LLM — только admin")
-    r = llm.test_connection()
+    body = body or {}
+    r = llm.test_connection(url=body.get("url") or "",
+                            token=body.get("token") or "",
+                            model=body.get("model") or "")
     audit(user, "llm_test", "llm", f"ok={r['ok']} {r['latency_ms']}ms")
     return r
 

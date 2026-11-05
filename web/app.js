@@ -791,7 +791,8 @@ async function viewAdmin(){
     <div class="card"><h2 style="margin-top:0">AI-Buddy: корпоративная LLM</h2>
       <p class="small mut">Подключение LLM для AI-ассистента (BR-48…50) и будущих AI-сценариев (BR-27…29).
       OpenAI-совместимый контракт: <code>{URL}/chat/completions</code>. Токен хранится в настройках
-      платформы и никогда не возвращается в UI целиком.</p>
+      платформы и никогда не возвращается в UI целиком. «Проверить связь» можно до сохранения —
+      используются значения из полей формы.</p>
       <div id="llm-status"></div>
       <div id="llm-form" style="margin-top:8px">
         <label>Base URL</label><input id="llm-url" placeholder="https://aibuddy.internal.company/v1">
@@ -845,7 +846,8 @@ async function llmSave(){
 async function llmTest(){
   $('#llm-res').innerHTML = '<p class="small mut">Проверяю связь с LLM…</p>';
   try{
-    const r = await api('/admin/llm/test', {method:'POST'});
+    const r = await api('/admin/llm/test', {method:'POST', body: JSON.stringify({
+      url:$('#llm-url').value, token:$('#llm-token').value, model:$('#llm-model').value})});
     $('#llm-res').innerHTML = `<div class="btnrow">
       <span class="badge ${r.ok?'b-approved':'b-changes_requested'}">${r.ok?'✔ связь есть':'✖ ошибка связи'}</span>
       <span class="small mut">${esc(r.detail)} · ${r.latency_ms} мс</span></div>`;
