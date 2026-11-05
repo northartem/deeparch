@@ -666,7 +666,6 @@ async function nfrSave(mid){
 
 /* ---------- MVP2: AI-ассистент по стандарту (BR-48…50) — чат в стиле ChatGPT ---------- */
 const PROVIDER_RU = {'ai-buddy': 'AI-Buddy (корпоративная LLM)', 'local-rag': 'локальная база знаний (LLM не подключена)', 'none': ''};
-const CHAT_KEY = 'darch_chat_v1';
 let CHAT = [];            // [{role:'user'|'bot', text, provider, model, confidence, citations}]
 let CHAT_BUSY = false;
 
@@ -688,12 +687,43 @@ function mdLite(src){
   return t;
 }
 
+const CHAT_MODEL_KEY = 'darch_chat_model';
+
+function chatModelSel(){
+  const s = $('#chat-model');
+  return s && s.value ? s.value : '';
+}
+
+async function chatLoadModels(){
+  // селектор моделей в строке чата (скрыт, если LLM не подключена)
+  try{
+    const r = await api('/assistant/models');
+    const sel = $('#chat-model'); if(!sel || !r.models || !r.models.length) return;
+    sel.innerHTML = r.models.map(m =>
+      `<option value="${esc(m)}"${m === r.default ? ' selected' : ''}>${esc(m)}</option>`).join('');
+    const saved = localStorage.getItem(CHAT_MODEL_KEY);
+    if(saved && r.models.includes(saved)) sel.value = saved;
+    sel.style.display = '';
+  }catch{ /* селектор остаётся скрыт */ }
+}
+
+function chatModelPick(){
+  const s = $('#chat-model');
+  if(s && s.value) localStorage.setItem(CHAT_MODEL_KEY, s.value);
+}
+
 async function viewAssistant(){
   let st = {provider:'local-rag', kb_pages:'…', kb_chunks:''};
   try{ st = await api('/assistant/status'); }catch{}
-  try{ CHAT = JSON.parse(sessionStorage.getItem(CHAT_KEY) || '[]'); }catch{ CHAT = []; }
+  try{
+    const h = await api('/assistant/history');
+    CHAT = (h.messages || []).map(m => ({
+      role: m.role === 'assistant' ? 'bot' : 'user',
+      text: m.content, provider: m.provider, model: m.model,
+      confidence: m.confidence, citations: m.citations || []}));
+  }catch{ CHAT = []; }
   const badge = st.provider === 'ai-buddy'
-    ? `<span class="badge b-approved">● AI-Buddy · ${esc(st.model||'')}</span>`
+    ? `<span class="badge b-approved">● AI-Buddy</span>`
     : `<span class="badge b-in_review">● fallback: локальная база знаний</span>`;
   $('#view').innerHTML = `
   <div class="chat-wrap">
@@ -709,6 +739,8 @@ async function viewAssistant(){
       <div class="composer-box">
         <textarea id="q" rows="1" placeholder="Спросите про стандарт — артефакты, ревью, техдолг, fitness…"
           onkeydown="chatKeydown(event)" oninput="chatAutogrow(this)"></textarea>
+        <select id="chat-model" class="chat-model" style="display:none"
+          onchange="chatModelPick()" title="Модель LLM"></select>
         <button class="send-btn" id="send-btn" onclick="askAssistant()" title="Отправить (Enter)">↑</button>
       </div>
       <p class="small mut" style="text-align:center;margin-top:8px">
@@ -718,6 +750,7 @@ async function viewAssistant(){
   </div>`;
   renderChat();
   $('#q').focus();
+  chatLoadModels();
 }
 
 function chatMsgHtml(m){
@@ -728,7 +761,6 @@ function chatMsgHtml(m){
      <span class="small mut">pageId=${c.page_id}</span></span>`).join('')}</div>` : '';
   const meta = `<div class="btnrow chat-meta">
       <span class="badge ${m.provider==='ai-buddy'?'b-approved':'b-in_review'} small-badge">${esc(PROVIDER_RU[m.provider]||m.provider||'')}</span>
-      ${m.model?`<span class="chip small">${esc(m.model)}</span>`:''}
       <span class="small mut">уверенность ${Math.round((m.confidence||0)*100)}% · advisory</span></div>`;
   return `<div class="msg bot"><div class="avatar">▲</div><div class="body">
     <div class="bot-text">${mdLite(m.text)}</div>${cites}${meta}</div></div>`;
@@ -757,9 +789,11 @@ function renderChat(typing=false){
   sc.scrollTop = (CHAT.length || typing) ? sc.scrollHeight : 0;
 }
 
-function chatNew(){
+async function chatNew(){
   if(CHAT_BUSY) return;
-  CHAT = []; sessionStorage.removeItem(CHAT_KEY); renderChat(); $('#q').focus();
+  CHAT = [];
+  try{ await api('/assistant/history', {method:'DELETE'}); }catch{}
+  renderChat(); $('#q').focus();
 }
 function chatKeydown(e){
   if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); askAssistant(); }
@@ -781,21 +815,22 @@ async function askAssistant(){
   renderChat(true);   // индикатор набора, пока летит запрос
   const history = CHAT.slice(0, -1).map(m => ({role: m.role === 'bot' ? 'assistant' : 'user',
                                                content: m.text}));
-  const ok = await chatStream(question, history);
-  if(!ok) await chatFallback(question, history);
+  const model = chatModelSel();
+  const ok = await chatStream(question, history, model);
+  if(!ok) await chatFallback(question, history, model);
   CHAT_BUSY = false; if($('#send-btn')) $('#send-btn').disabled = false;
   renderChat();
 }
 
 /* Стриминговый ответ: SSE от /assistant/stream + посимвольная «допечатка».
    Возвращает true, если стриминг состоялся. */
-async function chatStream(question, history){
+async function chatStream(question, history, model){
   let resp;
   try{
     resp = await fetch('/api/assistant/stream', {
       method:'POST',
       headers:{'Content-Type':'application/json', 'X-Token': localStorage.token||''},
-      body: JSON.stringify({question, history})});
+      body: JSON.stringify({question, history, model})});
   }catch{ return false; }
   if(!resp.ok || !resp.body) return false;
 
@@ -818,7 +853,6 @@ async function chatStream(question, history){
   const finalize = () => {
     msg.text = full; msg.streaming = false;
     CHAT.push(msg);
-    sessionStorage.setItem(CHAT_KEY, JSON.stringify(CHAT.slice(-40)));
     settle(true);
   };
   const applyMeta = m => {
@@ -880,17 +914,16 @@ async function chatStream(question, history){
 }
 
 /* Fallback: обычный запрос к /assistant (если стриминг недоступен) */
-async function chatFallback(question, history){
+async function chatFallback(question, history, model){
   const msg = {role:'bot', text:'', provider:'local-rag', model:null, confidence:0, citations:[]};
   try{
-    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question, history})});
+    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question, history, model})});
     msg.text = r.answer; msg.provider = r.provider; msg.model = r.model;
     msg.confidence = r.confidence; msg.citations = r.citations || [];
   }catch(e){
     msg.text = `⚠ ${e.message}`; msg.provider = 'none';
   }
   CHAT.push(msg);
-  sessionStorage.setItem(CHAT_KEY, JSON.stringify(CHAT.slice(-40)));
 }
 
 /* ---------- ролевая модель (Доступ) ---------- */

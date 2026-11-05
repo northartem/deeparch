@@ -626,6 +626,65 @@ def factory_scaffold(body=Body(...), user=Depends(current_user)):
 
 # ---------- MVP2: RAG-ассистент (BR-48…50) ----------
 
+def _chat_save(user_id: int, role: str, content: str, provider: str | None = None,
+               model: str | None = None, confidence: float | None = None,
+               citations: list | None = None):
+    """Сохранение реплики в историю чата пользователя (+ обрезка хвоста).
+
+    Повторный user-вопрос в течение 10 секунд не дублируется
+    (случай fallback-запроса после оборвавшегося стрима).
+    """
+    if role == "user":
+        last = q1("SELECT role, content FROM chat_messages WHERE user_id=? "
+                  "AND created_at > ? ORDER BY id DESC LIMIT 1",
+                  (user_id, now() - 10))
+        if last and last["role"] == "user" and last["content"] == content:
+            return
+    exec("INSERT INTO chat_messages(user_id,role,content,provider,model,confidence,"
+         "citations,created_at) VALUES(?,?,?,?,?,?,?,?)",
+         (user_id, role, content[:8000], provider, model, confidence,
+          json.dumps(citations, ensure_ascii=False) if citations else None, now()))
+    exec("DELETE FROM chat_messages WHERE user_id=? AND id NOT IN "
+         "(SELECT id FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 200)",
+         (user_id, user_id))
+
+
+def _chat_history(user_id: int, limit: int = 40) -> list[dict]:
+    rows = q("SELECT * FROM chat_messages WHERE user_id=? "
+             "ORDER BY id DESC LIMIT ?", (user_id, limit))
+    out = []
+    for r in reversed(rows):
+        try:
+            cites = json.loads(r["citations"]) if r["citations"] else []
+        except ValueError:
+            cites = []
+        out.append({"role": r["role"], "content": r["content"],
+                    "provider": r["provider"], "model": r["model"],
+                    "confidence": r["confidence"], "citations": cites})
+    return out
+
+
+@router.get("/assistant/history")
+def assistant_history(user=Depends(current_user)):
+    return {"messages": _chat_history(user["id"])}
+
+
+@router.delete("/assistant/history")
+def assistant_history_clear(user=Depends(current_user)):
+    exec("DELETE FROM chat_messages WHERE user_id=?", (user["id"],))
+    return {"ok": True}
+
+
+@router.get("/assistant/models")
+def assistant_models(user=Depends(current_user)):
+    """Список моделей для селектора в чате (любой авторизованный пользователь)."""
+    _, _tok, model = llm.config()
+    if not llm.configured():
+        return {"models": [], "default": model}
+    r = llm.list_models()
+    return {"models": r["models"] or [model], "default": model}
+
+
 @router.post("/assistant")
 def assistant(body=Body(...), user=Depends(current_user)):
     question = (body.get("question") or "").strip()
@@ -636,7 +695,12 @@ def assistant(body=Body(...), user=Depends(current_user)):
         raise HTTPException(400, "history должен быть списком сообщений")
     clean = [{"role": m.get("role"), "content": (m.get("content") or "")[:2000]}
              for m in history[-6:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
-    r = kb.answer(question, history=clean)
+    model = (body.get("model") or "").strip()
+    _chat_save(user["id"], "user", question)
+    r = kb.answer(question, history=clean, model=model)
+    _chat_save(user["id"], "assistant", r["answer"], provider=r["provider"],
+               model=r.get("model"), confidence=r.get("confidence"),
+               citations=r.get("citations"))
     r["mode"] = "advisory"   # BR-33: решение за человеком
     return r
 
@@ -657,10 +721,22 @@ def assistant_stream(body=Body(...), user=Depends(current_user)):
         raise HTTPException(400, "history должен быть списком сообщений")
     clean = [{"role": m.get("role"), "content": (m.get("content") or "")[:2000]}
              for m in history[-6:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+    model = (body.get("model") or "").strip()
+    _chat_save(user["id"], "user", question)
 
     def gen():
-        for ev in kb.answer_stream(question, history=clean):
+        meta, parts = {}, []
+        for ev in kb.answer_stream(question, history=clean, model=model):
+            if ev["type"] == "meta":
+                meta = ev
+            elif ev["type"] == "delta":
+                parts.append(ev["text"])
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        text = "".join(parts)
+        if text:
+            _chat_save(user["id"], "assistant", text, provider=meta.get("provider"),
+                       model=meta.get("model"), confidence=meta.get("confidence"),
+                       citations=meta.get("citations"))
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream",

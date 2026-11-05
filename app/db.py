@@ -150,6 +150,18 @@ CREATE TABLE IF NOT EXISTS app_settings (    -- MVP2: настройки пла�
   value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS chat_messages (   -- MVP2: история чата ассистента (по пользователю)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  role TEXT NOT NULL,                        -- 'user' | 'assistant'
+  content TEXT NOT NULL,
+  provider TEXT,                             -- ai-buddy | local-rag | none
+  model TEXT,
+  confidence REAL,
+  citations TEXT,                            -- JSON [{page_id,title,url}]
+  created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS fitness_rules (   -- MVP2 BR-41: правила-фитнес-функции
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,

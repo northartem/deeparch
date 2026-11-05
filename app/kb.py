@@ -136,11 +136,12 @@ def _llm_messages(question: str, ctx: list, history: list | None) -> list[dict]:
     return msgs
 
 
-def answer(question: str, k: int = 4, history: list | None = None) -> dict:
+def answer(question: str, k: int = 4, history: list | None = None, model: str = "") -> dict:
     """Ответ ассистента: LLM по контексту из базы знаний (или fallback) + цитаты.
 
     history — предыдущий диалог [{role: user|assistant, content: str}]
     для follow-up вопросов (используется только LLM-веткой).
+    model — переопределение модели LLM (выбор в чате).
     """
     prep = _prep(question, k)
     if prep is None:
@@ -150,10 +151,10 @@ def answer(question: str, k: int = 4, history: list | None = None) -> dict:
     citations, ctx, q, hits = prep
     if llm.configured():
         try:
-            text = llm.chat(_llm_messages(question, ctx, history))
+            text = llm.chat(_llm_messages(question, ctx, history), model=model)
             return {"answer": text.strip(), "citations": citations,
                     "confidence": 0.9, "provider": "ai-buddy",
-                    "model": llm.config()[2]}
+                    "model": (model or "").strip() or llm.config()[2]}
         except llm.LLMError as e:
             note = f"\n\n⚠ LLM недоступна ({e}) — извлекающий ответ из базы знаний:"
         else:
@@ -167,12 +168,13 @@ def answer(question: str, k: int = 4, history: list | None = None) -> dict:
             "citations": citations, "confidence": confidence, "provider": "local-rag"}
 
 
-def answer_stream(question: str, k: int = 4, history: list | None = None):
+def answer_stream(question: str, k: int = 4, history: list | None = None, model: str = ""):
     """Стриминговая версия answer(): генератор событий для SSE.
 
     События: {"type":"meta", provider, model, confidence, citations}
              {"type":"delta", text}          — дельта ответа
              {"type":"done"}
+    model — переопределение модели LLM (выбор в чате).
     Fallback при ошибке LLM / без конфигурации: извлекающий ответ одной дельтой.
     """
     prep = _prep(question, k)
@@ -185,12 +187,14 @@ def answer_stream(question: str, k: int = 4, history: list | None = None):
         return
     citations, ctx, q, hits = prep
     if llm.configured():
-        url_, _tok, model = llm.config()
-        yield {"type": "meta", "provider": "ai-buddy", "model": model,
+        url_, _tok, def_model = llm.config()
+        eff_model = (model or "").strip() or def_model
+        yield {"type": "meta", "provider": "ai-buddy", "model": eff_model,
                "confidence": 0.9, "citations": citations}
         full = []
         try:
-            for delta in llm.chat_stream(_llm_messages(question, ctx, history)):
+            for delta in llm.chat_stream(_llm_messages(question, ctx, history),
+                                         model=eff_model):
                 full.append(delta)
                 yield {"type": "delta", "text": delta}
             if full:

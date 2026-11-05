@@ -208,6 +208,9 @@ main:has(.chat-wrap){max-width:none}
   align-items:center;justify-content:center;transition:background .12s;flex:0 0 36px}
 .send-btn:hover{background:var(--accent-hover)}
 .send-btn:disabled{background:var(--line-strong);cursor:default}
+.composer-box select.chat-model{flex:0 0 auto;max-width:170px;align-self:flex-end;
+  margin-bottom:2px;font:inherit;font-size:12px;padding:4px 6px;border:1px solid var(--line);
+  border-radius:8px;background:var(--bg);color:inherit;outline:none;cursor:pointer}
 .chat-empty{padding-top:9vh;text-align:center}
 .greet{font-size:26px;font-weight:700;letter-spacing:-.4px;margin:14px 0 6px}
 .sugg-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:22px}

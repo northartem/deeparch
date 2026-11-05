@@ -95,7 +95,10 @@ POST /api/services/{id}/fitness          → прогон fitness-проверо
 GET  /api/services/{id}/fitness/ci.txt   → CI-пак (gitlab-ci + python)
 POST /api/factory/scaffold               → Service Factory (BR-45…47)
 POST /api/assistant                      → AI-ассистент с цитатами (BR-48…50)
+POST /api/assistant/stream               → стриминг ответа (SSE: meta → delta* → done)
 GET  /api/assistant/status               → провайдер LLM + размер базы знаний
+GET  /api/assistant/models               → список моделей для селектора в чате
+GET/DELETE /api/assistant/history        → история чата пользователя (40 последних / очистка)
 POST /api/services/{id}/nfr/extract      → извлечь NFR-цели из артефакта
 PATCH /api/nfr/{mid}                     → факт по метрике + вердикт
 POST /api/integrations/confluence/export|import → XHTML экспорт / markdown импорт долга

@@ -103,11 +103,16 @@ def list_models(url: str = "", token: str = "") -> dict:
         return {"ok": False, "detail": f"Неожиданный формат ответа: {e}", "models": []}
 
 
-def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900) -> str:
-    """messages: [{"role": "system"|"user"|"assistant", "content": str}] → текст ответа."""
-    url, token, model = config()
+def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900,
+         model: str = "") -> str:
+    """messages: [{"role": "system"|"user"|"assistant", "content": str}] → текст ответа.
+
+    model — переопределение модели (выбор в чате); пусто = модель из конфигурации.
+    """
+    url, token, def_model = config()
     if not (url and token):
         raise LLMError("AI-Buddy не сконфигурирован (админ-панель → Интеграции)")
+    model = (model or "").strip() or def_model
     try:
         r = httpx.post(
             f"{url}/chat/completions",
@@ -127,14 +132,17 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900) 
         raise LLMError(f"Неожиданный формат ответа AI-Buddy: {e}") from e
 
 
-def chat_stream(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900):
+def chat_stream(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900,
+                model: str = ""):
     """Стриминг ответа: генератор дельт текста (OpenAI stream=true, SSE).
 
+    model — переопределение модели (выбор в чате); пусто = модель из конфигурации.
     Бросает LLMError при отсутствии конфигурации / сетевой ошибке / HTTP-ошибке.
     """
-    url, token, model = config()
+    url, token, def_model = config()
     if not (url and token):
         raise LLMError("AI-Buddy не сконфигурирован (админ-панель → Интеграции)")
+    model = (model or "").strip() or def_model
     try:
         with httpx.stream(
                 "POST", f"{url}/chat/completions",
