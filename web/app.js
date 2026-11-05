@@ -752,10 +752,21 @@ async function viewAdmin(){
       <p class="small mut">DataGerry — REST API + ObjectTypes (контур кибербезопасности). Матрица владения полями:
       ИС → архитектурные атрибуты, CMDB → операционные (CI, health, алерты). Подключение — после финализации выбора CMDB.</p>
       <span class="badge b-draft">запланировано</span></div>
-    <div class="card"><h2 style="margin-top:0">AI-Buddy (BR-27)</h2>
-      <p class="small mut">Все AI-сценарии через корпоративную LLM-платформу. MVP работает на mock-провайдере
-      (детерминированные эвристики) — контракт API уже финальный.</p>
-      <span class="badge b-Ch">mock → production</span></div>
+    <div class="card"><h2 style="margin-top:0">AI-Buddy: корпоративная LLM</h2>
+      <p class="small mut">Подключение LLM для AI-ассистента (BR-48…50) и будущих AI-сценариев (BR-27…29).
+      OpenAI-совместимый контракт: <code>{URL}/chat/completions</code>. Токен хранится в настройках
+      платформы и никогда не возвращается в UI целиком.</p>
+      <div id="llm-status"></div>
+      <div id="llm-form" style="margin-top:8px">
+        <label>Base URL</label><input id="llm-url" placeholder="https://aibuddy.internal.company/v1">
+        <div class="grid g2"><div><label>Токен</label><input id="llm-token" type="password" placeholder="сервисный токен"></div>
+        <div><label>Модель</label><input id="llm-model" placeholder="ai-buddy-large"></div></div>
+        <div class="btnrow"><button onclick="llmSave()">Подключить</button>
+          <button class="sec" onclick="llmTest()">Проверить связь</button>
+          <button class="sec" onclick="llmRemove()">Отключить</button></div>
+      </div>
+      <div id="llm-res" style="margin-top:8px"></div>
+    </div>
     <div class="card"><h2 style="margin-top:0">Confluence: реестр техдолга (BR-54…56)</h2>
       <p class="small mut">Двусторонняя синхронизация со страницей «Реестр технического долга»
       (pageId=915912594): экспорт XHTML (storage format) и импорт markdown-таблицы.
@@ -771,6 +782,45 @@ async function viewAdmin(){
       <div class="btnrow">${can?'<button class="sec" onclick="showAudit()">Открыть журнал</button>':'<span class="mut small">нужна роль domain_expert+</span>'}</div>
       <div id="audit-res"></div></div>
   </div>`;
+  if (S.user.role === 'admin') renderLlm();
+}
+async function renderLlm(){
+  try{
+    const c = await api('/admin/llm');
+    $('#llm-status').innerHTML = c.configured
+      ? `<div class="btnrow"><span class="badge b-approved">● LLM подключена</span>
+         <span class="chip small">${esc(c.url)}</span><span class="chip small">${esc(c.model)}</span>
+         <span class="chip small">токен ${esc(c.token_masked)}</span></div>`
+      : `<div class="btnrow"><span class="badge b-in_review">● LLM не подключена — ассистент в fallback-режиме</span></div>`;
+    $('#llm-url').value = c.url || '';
+    $('#llm-model').value = c.model || '';
+    $('#llm-token').placeholder = c.token_set ? `задан (${c.token_masked}) — введите новый для замены` : 'сервисный токен';
+  }catch(e){ $('#llm-status').innerHTML = `<p class="small mut">${esc(e.message)}</p>`; }
+}
+async function llmSave(){
+  try{
+    const c = await api('/admin/llm', {method:'POST', body: JSON.stringify({
+      url:$('#llm-url').value, token:$('#llm-token').value, model:$('#llm-model').value})});
+    $('#llm-token').value = '';
+    toast(c.configured ? `LLM подключена: ${esc(c.model)}` : 'URL пуст — LLM отключена');
+    renderLlm();
+  }catch(e){ toast(esc(e.message), true); }
+}
+async function llmTest(){
+  $('#llm-res').innerHTML = '<p class="small mut">Проверяю связь с LLM…</p>';
+  try{
+    const r = await api('/admin/llm/test', {method:'POST'});
+    $('#llm-res').innerHTML = `<div class="btnrow">
+      <span class="badge ${r.ok?'b-approved':'b-changes_requested'}">${r.ok?'✔ связь есть':'✖ ошибка связи'}</span>
+      <span class="small mut">${esc(r.detail)} · ${r.latency_ms} мс</span></div>`;
+  }catch(e){ toast(esc(e.message), true); $('#llm-res').innerHTML = ''; }
+}
+async function llmRemove(){
+  try{
+    await api('/admin/llm/remove', {method:'POST'});
+    $('#llm-res').innerHTML = '';
+    toast('LLM отключена, настройки удалены'); renderLlm();
+  }catch(e){ toast(esc(e.message), true); }
 }
 async function importBackstage(dry){
   try{

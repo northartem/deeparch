@@ -11,7 +11,7 @@ from .standards import (STANDARD_NAME, STANDARD_REF, ARTIFACT_KINDS, CHECKLIST_I
                         COMPONENT_KINDS, COMPONENT_STATUSES,
                         DEBT_TYPES, DEBT_STATUSES, DEBT_RISKS, DEBT_PRIORITIES)
 from .debts import gen_debt_id
-from . import ai, integrations, fitness, factory, nfr, kb
+from . import ai, integrations, fitness, factory, nfr, kb, llm
 from .seed import seed, demo_vision_template
 
 router = APIRouter(prefix="/api")
@@ -638,6 +638,48 @@ def assistant(body=Body(...), user=Depends(current_user)):
 @router.get("/assistant/status")
 def assistant_status(user=Depends(current_user)):
     return kb.status()
+
+
+# ---------- MVP2: подключение LLM в админ-панели ----------
+
+@router.get("/admin/llm")
+def llm_config(user=Depends(current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Настройки LLM — только admin")
+    url, _, model = llm.config()
+    return {"configured": llm.configured(), "source": llm.source(),
+            "url": url or "", "model": model,
+            "token_set": bool(llm.config()[1]), "token_masked": llm.masked_token()}
+
+
+@router.post("/admin/llm")
+def llm_save(body=Body(...), user=Depends(current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Настройки LLM — только admin")
+    url = (body.get("url") or "").strip()
+    if url and not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "URL должен начинаться с http:// или https://")
+    llm.save_settings(url, body.get("token") or "", body.get("model") or "")
+    audit(user, "llm_config", "llm", f"url={url or '—'} (источник: settings)")
+    return llm_config(user)   # конфигурация без env могла не примениться — вернём факт
+
+
+@router.post("/admin/llm/test")
+def llm_test(user=Depends(current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Настройки LLM — только admin")
+    r = llm.test_connection()
+    audit(user, "llm_test", "llm", f"ok={r['ok']} {r['latency_ms']}ms")
+    return r
+
+
+@router.post("/admin/llm/remove")
+def llm_remove(user=Depends(current_user)):
+    if user["role"] != "admin":
+        raise HTTPException(403, "Настройки LLM — только admin")
+    llm.clear_settings()
+    audit(user, "llm_config", "llm", "отключена (настройки удалены)")
+    return {"ok": True}
 
 
 # ---------- MVP2: NFR-валидация (BR-51…53) ----------

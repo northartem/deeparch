@@ -145,6 +145,11 @@ CREATE TABLE IF NOT EXISTS tech_debts (
   updated_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (    -- MVP2: настройки платформы (ключ-значение)
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+
 CREATE TABLE IF NOT EXISTS fitness_rules (   -- MVP2 BR-41: правила-фитнес-функции
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,

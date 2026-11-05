@@ -1,7 +1,8 @@
 """Клиент корпоративной LLM-платформы (AI-Buddy).
 
-Контракт: OpenAI-совместимый chat/completions. Конфигурация через переменные
-окружения:
+Контракт: OpenAI-совместимый chat/completions. Конфигурация берётся из настроек
+платформы (таблица app_settings, ключи llm_url/llm_token/llm_model — задаются
+в админ-панели) с приоритетом над переменными окружения:
   AI_BUDDY_URL    — базовый URL, напр. https://aibuddy.internal.company/v1
   AI_BUDDY_TOKEN  — сервисный токен
   AI_BUDDY_MODEL  — модель (по умолчанию ai-buddy-large)
@@ -12,20 +13,61 @@
 """
 import os
 import httpx
+from .db import q, q1, exec, now
 
 TIMEOUT = 30.0
 
+LLM_KEYS = {"url": "llm_url", "token": "llm_token", "model": "llm_model"}
+
+
+def _setting(key):
+    r = q1("SELECT value FROM app_settings WHERE key=?", (key,))
+    return r["value"] if r and r["value"] else None
+
 
 def config():
-    url = os.environ.get("AI_BUDDY_URL", "").rstrip("/")
-    token = os.environ.get("AI_BUDDY_TOKEN", "")
-    model = os.environ.get("AI_BUDDY_MODEL", "ai-buddy-large")
-    return url, token, model
+    """Настройки LLM: БД (админ-панель) → env → дефолт модели."""
+    url = _setting(LLM_KEYS["url"]) or os.environ.get("AI_BUDDY_URL", "")
+    token = _setting(LLM_KEYS["token"]) or os.environ.get("AI_BUDDY_TOKEN", "")
+    model = _setting(LLM_KEYS["model"]) or os.environ.get("AI_BUDDY_MODEL") \
+        or "ai-buddy-large"
+    return url.rstrip("/"), token, model
+
+
+def source() -> str:
+    """Откуда взята конфигурация: settings / env / none."""
+    if _setting(LLM_KEYS["url"]):
+        return "settings"
+    if os.environ.get("AI_BUDDY_URL"):
+        return "env"
+    return "none"
 
 
 def configured() -> bool:
     url, token, _ = config()
     return bool(url and token)
+
+
+def save_settings(url: str, token: str, model: str):
+    """Сохранение из админ-панели. Пустой token = оставить прежний."""
+    for key, value in ((LLM_KEYS["url"], url.strip()),
+                       (LLM_KEYS["model"], (model or "").strip() or "ai-buddy-large")):
+        exec("INSERT INTO app_settings(key,value) VALUES(?,?) "
+             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    if token.strip():
+        exec("INSERT INTO app_settings(key,value) VALUES(?,?) "
+             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+             (LLM_KEYS["token"], token.strip()))
+
+
+def clear_settings():
+    exec("DELETE FROM app_settings WHERE key IN (?,?,?)",
+         tuple(LLM_KEYS.values()))
+
+
+def masked_token() -> str:
+    t = config()[1]
+    return f"…{t[-4:]}" if len(t) >= 4 else ("задан" if t else "")
 
 
 class LLMError(Exception):
@@ -36,7 +78,7 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900) 
     """messages: [{"role": "system"|"user"|"assistant", "content": str}] → текст ответа."""
     url, token, model = config()
     if not (url and token):
-        raise LLMError("AI-Buddy не сконфигурирован (AI_BUDDY_URL / AI_BUDDY_TOKEN)")
+        raise LLMError("AI-Buddy не сконфигурирован (админ-панель → Интеграции)")
     try:
         r = httpx.post(
             f"{url}/chat/completions",
@@ -52,3 +94,17 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900) 
         raise LLMError(f"AI-Buddy недоступен: {e.__class__.__name__}") from e
     except (KeyError, IndexError, ValueError) as e:
         raise LLMError(f"Неожиданный формат ответа AI-Buddy: {e}") from e
+
+
+def test_connection() -> dict:
+    """Проверка связи из админ-панели: минимальный запрос к LLM."""
+    import time
+    t0 = time.monotonic()
+    try:
+        text = chat([{"role": "user", "content": "Ответь одним словом: ping"}],
+                    temperature=0.0, max_tokens=16)
+        return {"ok": True, "detail": f"LLM ответила: {text.strip()[:80]!r}",
+                "latency_ms": int((time.monotonic() - t0) * 1000)}
+    except LLMError as e:
+        return {"ok": False, "detail": str(e),
+                "latency_ms": int((time.monotonic() - t0) * 1000)}

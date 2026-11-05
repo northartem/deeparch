@@ -150,5 +150,6 @@ def status() -> dict:
     url, _, model = llm.config()
     return {"provider": "ai-buddy" if llm.configured() else "local-rag",
             "model": model if llm.configured() else None,
+            "source": llm.source(),
             "kb_pages": len(PAGES), "kb_chunks": len(CHUNKS),
             "ai_buddy_url": url or None}
