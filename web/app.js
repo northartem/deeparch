@@ -259,7 +259,8 @@ function tabCard(s){
     <div><label>Жизненный цикл</label><select id="c-lc">${['design','development','production','decommissioned'].map(l=>`<option ${l===s.lifecycle?'selected':''}>${l}</option>`).join('')}</select></div></div>
     <label>CMDB ID</label><input id="c-cmdb" value="${esc(s.cmdb_id||'')}" placeholder="CI из CMDB (BR-20)">
     <div class="btnrow"><button onclick="saveCard(${s.id})">Сохранить</button>
-    <button class="cya" onclick="exportCatalog(${s.id})">Экспорт catalog-info.yaml (BR-21)</button></div></div>
+    <button class="cya" onclick="exportCatalog(${s.id})">Экспорт catalog-info.yaml (BR-21)</button>
+    <button class="sec" onclick="askAssistantAbout(${s.id})">▲ Спросить ассистента</button></div></div>
   <div class="card"><h2 style="margin-top:0">Обязательные артефакты для типа</h2>
     <p class="mut small">Матрица «Минимальные наборы по типам проектов» из Навигатора стандарта</p>
     ${s.mandatory_artifacts.map(k=>`<span class="chip">● ${esc(S.standard.artifacts.find(a=>a.kind===k)?.title||k)}</span>`).join('')||'<span class="mut">—</span>'}
@@ -283,7 +284,16 @@ async function exportCatalog(id){
 function tabArtifacts(s){
   const arts = S.standard.artifacts;
   const byKind = Object.fromEntries(s.artifacts.map(a=>[a.kind,a]));
-  $('#tabbody').innerHTML = arts.map(a=>{
+  const mandatoryCount = s.mandatory_artifacts.filter(k => {
+    const c = byKind[k]; return !c || !(c.content_md||'').trim();
+  }).length;
+  $('#tabbody').innerHTML = `
+  <div class="card" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <div><b>Артефакты сервиса</b>
+      <span class="small mut">· обязательных для типа: ${s.mandatory_artifacts.length}${mandatoryCount?`, без контента: <b style="color:var(--bad)">${mandatoryCount}</b>`:''}</span>
+    </div>
+    <button class="cya" onclick="scaffoldArtifacts(${s.id}, this)">⚡ Сгенерировать скелеты обязательных артефактов</button>
+  </div>` + arts.map(a=>{
     const cur = byKind[a.kind]||{};
     const mandatory = s.mandatory_artifacts.includes(a.kind);
     return `<div class="card" style="margin-bottom:14px">
@@ -307,7 +317,7 @@ function tabArtifacts(s){
     </div>
     <div class="btnrow">
       <label style="margin:0;flex:1"><input id="u-${a.kind}" placeholder="Ссылка на исходник / файл (успех = ссылка)" value="${esc(cur.source_url||'')}"></label>
-      <button class="sec" onclick="aiDraft(${s.id},'${a.kind}')">✨ AI-черновик</button>
+      <button class="sec" onclick="aiDraft(${s.id},'${a.kind}',this)">✨ AI-черновик</button>
       <button onclick="saveArt(${s.id},'${a.kind}')">Сохранить (v${(cur.version||1)+1})</button>
     </div></div>`;
   }).join('');
@@ -320,12 +330,31 @@ async function saveArt(sid, kind){
     diagram_code:$(`#d-${kind}`).value})});
   toast('Артефакт и диаграмма сохранены, версия поднята'); viewService(sid,'artifacts');
 }
-async function aiDraft(sid, kind){
+async function aiDraft(sid, kind, btn){
+  const old = btn ? btn.textContent : '';
+  if(btn){ btn.disabled = true; btn.textContent = '✨ Генерирую…'; }
   try{
-    const r = await api('/ai/draft', {method:'POST', body: JSON.stringify({service_id:sid, kind})});
+    const r = await api('/ai/draft', {method:'POST', body: JSON.stringify({
+      service_id:sid, kind, model: chatModelSel()})});
     $(`#a-${kind}`).value = r.content_md;
-    toast('AI-черновик (mock-провайдер) вставлен — <b>требует подтверждения автора</b> (BR-28/33)');
+    toast(r.provider === 'ai-buddy'
+      ? `AI-черновик (${esc(r.model||'AI-Buddy')}) вставлен — <b>требует подтверждения автора</b> (BR-28/33)`
+      : esc(r.note || 'Черновик вставлен — требует подтверждения автора (BR-28/33)'));
   }catch(e){ toast(esc(e.message), true); }
+  if(btn){ btn.disabled = false; btn.textContent = old; }
+}
+async function scaffoldArtifacts(sid, btn){
+  btn.disabled = true; btn.textContent = '⏳ Генерирую…';
+  try{
+    const r = await api(`/services/${sid}/artifacts/scaffold`, {method:'POST'});
+    if(r.created.length){
+      toast(`Созданы скелеты обязательных артефактов: <b>${r.created.map(esc).join(', ')}</b> — заполните заготовки`);
+      viewService(sid, 'artifacts');
+      return;   // view перерисован — кнопка уже новая
+    }
+    toast('Все обязательные артефакты уже заполнены или имеют скелеты');
+  }catch(e){ toast(esc(e.message), true); }
+  btn.disabled = false; btn.textContent = '⚡ Сгенерировать скелеты обязательных артефактов';
 }
 
 function tabCheck(s){
@@ -669,6 +698,8 @@ const PROVIDER_RU = {'ai-buddy': 'AI-Buddy (корпоративная LLM)', 'l
 let CHAT = [];            // [{role:'user'|'bot', text, provider, model, confidence, citations}]
 let CHAT_ID = null;       // id текущего чата-сессии на сервере (null = новый чат)
 let CHAT_BUSY = false;
+let ASK_SERVICE = null;   // контекст сервиса (ассистент из карточки сервиса)
+let ASK_SVC_NAME = '';
 
 const CHAT_SUGGESTIONS = [
   ['Какие документы обязательны для проекта?', 'Матрица обязательных артефактов по типам проектов'],
@@ -752,6 +783,10 @@ async function viewAssistant(){
   const badge = st.provider === 'ai-buddy'
     ? `<span class="badge b-approved">● AI-Buddy</span>`
     : `<span class="badge b-in_review">● fallback: локальная база знаний</span>`;
+  const svcChip = ASK_SERVICE
+    ? `<span class="chip" id="svc-ctx-chip">🧩 ${esc(ASK_SVC_NAME || ('service #' + ASK_SERVICE))}
+       <span style="cursor:pointer" onclick="clearAskService()" title="Убрать контекст сервиса">✕</span></span>`
+    : '';
   $('#view').innerHTML = `
   <div class="chat-shell">
     <aside class="chat-side">
@@ -762,7 +797,7 @@ async function viewAssistant(){
     <div class="chat-wrap">
       <div class="chat-head">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <b style="font-size:15px">AI-ассистент стандарта</b>${badge}
+          <b style="font-size:15px">AI-ассистент стандарта</b>${badge}${svcChip}
           <span class="chip small">база знаний: ${st.kb_pages} стр · ${st.kb_chunks} чанков</span>
         </div>
       </div>
@@ -787,6 +822,17 @@ async function viewAssistant(){
   $('#q').focus();
   chatLoadModels();
   loadChats();
+}
+
+async function askAssistantAbout(sid){
+  ASK_SERVICE = sid;
+  try{ const sv = await api('/services/' + sid); ASK_SVC_NAME = sv.name; }
+  catch{ ASK_SVC_NAME = ''; }
+  location.hash = '#/assistant';
+}
+function clearAskService(){
+  ASK_SERVICE = null; ASK_SVC_NAME = '';
+  const el = document.getElementById('svc-ctx-chip'); if(el) el.remove();
 }
 
 function chatMsgHtml(m){
@@ -865,7 +911,7 @@ async function chatStream(question, history, model){
     resp = await fetch('/api/assistant/stream', {
       method:'POST',
       headers:{'Content-Type':'application/json', 'X-Token': localStorage.token||''},
-      body: JSON.stringify({question, history, model, chat_id: CHAT_ID})});
+      body: JSON.stringify({question, history, model, chat_id: CHAT_ID, service_id: ASK_SERVICE})});
   }catch{ return false; }
   if(!resp.ok || !resp.body) return false;
 
@@ -953,7 +999,7 @@ async function chatStream(question, history, model){
 async function chatFallback(question, history, model){
   const msg = {role:'bot', text:'', provider:'local-rag', model:null, confidence:0, citations:[]};
   try{
-    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question, history, model, chat_id: CHAT_ID})});
+    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question, history, model, chat_id: CHAT_ID, service_id: ASK_SERVICE})});
     msg.text = r.answer; msg.provider = r.provider; msg.model = r.model;
     msg.confidence = r.confidence; msg.citations = r.citations || [];
     if(r.chat_id) CHAT_ID = r.chat_id;

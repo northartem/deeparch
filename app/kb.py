@@ -10,7 +10,9 @@ import math
 import os
 import re
 from . import llm
+from .db import q, q1
 from .kb_data import PAGES
+from .standards import ARTIFACT_KINDS
 
 _CHUNK = 900
 
@@ -122,26 +124,65 @@ def _prep(question: str, k: int = 4):
     return citations, ctx, q, hits
 
 
-def _llm_messages(question: str, ctx: list, history: list | None) -> list[dict]:
+def _service_context(service_id: int) -> str | None:
+    """Факты о сервисе из DeepArch — чтобы ассистент отвечал в контексте конкретного сервиса."""
+    svc = q1("SELECT * FROM services WHERE id=?", (service_id,))
+    if not svc:
+        return None
+    title = {a["kind"]: a["title"] for a in ARTIFACT_KINDS}
+    comps = q("SELECT c.name, c.kind, c.status FROM components c "
+              "JOIN service_components sc ON sc.component_id=c.id "
+              "WHERE sc.service_id=? LIMIT 15", (service_id,))
+    arts = q("SELECT kind, content_md, diagram_code, source_url FROM artifacts "
+             "WHERE service_id=? ORDER BY kind", (service_id,))
+    lines = [f"Сервис в системе DeepArch: {svc['name']} ({svc['code']}), "
+             f"домен: {svc['domain'] or '—'}, тип проекта: {svc['project_type']}, "
+             f"жизненный цикл: {svc['lifecycle']}, владелец: {svc['owner'] or '—'}, "
+             f"архитектор: {svc['architect'] or '—'}."]
+    if comps:
+        lines.append("Компоненты: " + "; ".join(
+            f"{c['name']} ({c['kind']}, {c['status']})" for c in comps) + ".")
+    if arts:
+        states = []
+        for a in arts:
+            st = "заполнен" if (a["content_md"] or "").strip() else "пуст"
+            if (a["diagram_code"] or "").strip():
+                st += ", есть диаграмма"
+            states.append(f"{title.get(a['kind'], a['kind'])} — {st}")
+        lines.append("Состояние артефактов: " + "; ".join(states) + ".")
+    run = q1("SELECT score_pct, mandatory_missing FROM checklist_runs WHERE service_id=? "
+             "ORDER BY created_at DESC LIMIT 1", (service_id,))
+    if run:
+        lines.append(f"Последний self-check: {run['score_pct']}%, "
+                     f"обязательных не закрыто: {run['mandatory_missing']}.")
+    return "\n".join(lines)
+
+
+def _llm_messages(question: str, ctx: list, history: list | None,
+                  service_ctx: str | None = None) -> list[dict]:
     msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
     # последний диалог (максимум 6 реплик) — для follow-up вопросов
     for m in (history or [])[-6:]:
         role, content = m.get("role"), (m.get("content") or "").strip()
         if role in ("user", "assistant") and content:
             msgs.append({"role": role, "content": content[:2000]})
+    svc_part = f"\n\nКонтекст текущего сервиса:\n{service_ctx}" if service_ctx else ""
     msgs.append({"role": "user", "content":
             "Контекст из базы знаний стандарта:\n\n" + "\n\n".join(ctx)
-            + f"\n\nВопрос архитектора: {question}\n"
+            + f"{svc_part}"
+              f"\n\nВопрос архитектора: {question}\n"
               "Ответь на вопрос строго по контексту."})
     return msgs
 
 
-def answer(question: str, k: int = 4, history: list | None = None, model: str = "") -> dict:
+def answer(question: str, k: int = 4, history: list | None = None, model: str = "",
+           service_id: int | None = None) -> dict:
     """Ответ ассистента: LLM по контексту из базы знаний (или fallback) + цитаты.
 
     history — предыдущий диалог [{role: user|assistant, content: str}]
     для follow-up вопросов (используется только LLM-веткой).
     model — переопределение модели LLM (выбор в чате).
+    service_id — контекст сервиса из DeepArch (ассистент в карточке сервиса).
     """
     prep = _prep(question, k)
     if prep is None:
@@ -149,9 +190,12 @@ def answer(question: str, k: int = 4, history: list | None = None, model: str = 
                           "Уточните вопрос или откройте стандарт напрямую.",
                 "citations": [], "confidence": 0.0, "provider": "none"}
     citations, ctx, q, hits = prep
+    svc_ctx = _service_context(service_id) if service_id else None
     if llm.configured():
         try:
-            text = llm.chat(_llm_messages(question, ctx, history), model=model)
+            text = llm.chat(_llm_messages(question, ctx, history, svc_ctx), model=model)
+            if not text.strip():
+                raise llm.LLMError("LLM вернула пустой ответ")
             return {"answer": text.strip(), "citations": citations,
                     "confidence": 0.9, "provider": "ai-buddy",
                     "model": (model or "").strip() or llm.config()[2]}
@@ -168,13 +212,15 @@ def answer(question: str, k: int = 4, history: list | None = None, model: str = 
             "citations": citations, "confidence": confidence, "provider": "local-rag"}
 
 
-def answer_stream(question: str, k: int = 4, history: list | None = None, model: str = ""):
+def answer_stream(question: str, k: int = 4, history: list | None = None, model: str = "",
+                  service_id: int | None = None):
     """Стриминговая версия answer(): генератор событий для SSE.
 
     События: {"type":"meta", provider, model, confidence, citations}
              {"type":"delta", text}          — дельта ответа
              {"type":"done"}
     model — переопределение модели LLM (выбор в чате).
+    service_id — контекст сервиса из DeepArch (ассистент в карточке сервиса).
     Fallback при ошибке LLM / без конфигурации: извлекающий ответ одной дельтой.
     """
     prep = _prep(question, k)
@@ -186,6 +232,7 @@ def answer_stream(question: str, k: int = 4, history: list | None = None, model:
         yield {"type": "done"}
         return
     citations, ctx, q, hits = prep
+    svc_ctx = _service_context(service_id) if service_id else None
     if llm.configured():
         url_, _tok, def_model = llm.config()
         eff_model = (model or "").strip() or def_model
@@ -193,7 +240,7 @@ def answer_stream(question: str, k: int = 4, history: list | None = None, model:
                "confidence": 0.9, "citations": citations}
         full = []
         try:
-            for delta in llm.chat_stream(_llm_messages(question, ctx, history),
+            for delta in llm.chat_stream(_llm_messages(question, ctx, history, svc_ctx),
                                          model=eff_model):
                 full.append(delta)
                 yield {"type": "delta", "text": delta}

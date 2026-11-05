@@ -103,7 +103,7 @@ def list_models(url: str = "", token: str = "") -> dict:
         return {"ok": False, "detail": f"Неожиданный формат ответа: {e}", "models": []}
 
 
-def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900,
+def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 2500,
          model: str = "") -> str:
     """messages: [{"role": "system"|"user"|"assistant", "content": str}] → текст ответа.
 
@@ -119,11 +119,13 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900,
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "application/json"},
             json={"model": model, "messages": messages,
-                  "temperature": temperature, "max_tokens": max_tokens},
+                  "temperature": temperature, "max_tokens": max_tokens,
+                  "reasoning_effort": "low"},
             timeout=TIMEOUT)
         r.raise_for_status()
         data = r.json()
-        return data["choices"][0]["message"]["content"]
+        # reasoning-модели могут вернуть content=None (весь бюджет ушёл в рассуждения)
+        return data["choices"][0]["message"].get("content") or ""
     except httpx.HTTPStatusError as e:
         raise LLMError(f"HTTP {e.response.status_code}: {e.response.text[:200]}") from e
     except httpx.HTTPError as e:
@@ -132,7 +134,7 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900,
         raise LLMError(f"Неожиданный формат ответа AI-Buddy: {e}") from e
 
 
-def chat_stream(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900,
+def chat_stream(messages: list[dict], temperature: float = 0.2, max_tokens: int = 2500,
                 model: str = ""):
     """Стриминг ответа: генератор дельт текста (OpenAI stream=true, SSE).
 
@@ -150,7 +152,7 @@ def chat_stream(messages: list[dict], temperature: float = 0.2, max_tokens: int 
                          "Content-Type": "application/json"},
                 json={"model": model, "messages": messages,
                       "temperature": temperature, "max_tokens": max_tokens,
-                      "stream": True},
+                      "reasoning_effort": "low", "stream": True},
                 timeout=TIMEOUT) as r:
             r.raise_for_status()
             for line in r.iter_lines():

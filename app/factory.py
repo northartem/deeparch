@@ -143,6 +143,35 @@ _TEMPLATES = {"vision_c4": _vision, "adr": _adr, "deployment": _deployment,
               "config_build": _config_build}
 
 
+def scaffold_missing(service_id: int, updated_by: str) -> list[str]:
+    """Создаёт скелеты (шаблоны стандарта) для обязательных артефактов типа,
+    которых ещё нет или которые пусты. Возвращает список созданных kind."""
+    svc = q1("SELECT * FROM services WHERE id=?", (service_id,))
+    if not svc:
+        return []
+    pt = PROJECT_TYPES.get(svc["project_type"], {})
+    mandatory = [k for k, v in pt.get("matrix", {}).items() if v == "mandatory"]
+    existing = {a["kind"]: a for a in
+                q("SELECT kind, content_md FROM artifacts WHERE service_id=?", (service_id,))}
+    created = []
+    for kind in mandatory:
+        cur = existing.get(kind)
+        if cur and (cur["content_md"] or "").strip():
+            continue
+        content = _TEMPLATES[kind](svc["code"], svc["name"], svc["domain"],
+                                   svc["project_type"]) if kind == "vision_c4" \
+            else _TEMPLATES[kind](svc["code"])
+        if cur:   # строка есть, но контента нет — обновляем
+            exec("UPDATE artifacts SET content_md=?, version=version+1, updated_by=?, "
+                 "updated_at=? WHERE service_id=? AND kind=?",
+                 (content, updated_by, now(), service_id, kind))
+        else:
+            exec("INSERT INTO artifacts(service_id,kind,content_md,version,updated_by,updated_at)"
+                 " VALUES(?,?,?,?,?,?)", (service_id, kind, content, 1, updated_by, now()))
+        created.append(kind)
+    return created
+
+
 def scaffold(code, name, domain, project_type, owner, architect,
              created_by, lifecycle="design"):
     """Создаёт сервис + стартовый архитектурный пакет + отчёт next_steps."""

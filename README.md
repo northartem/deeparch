@@ -86,7 +86,8 @@ POST /api/services/{id}/reviews          → на ревью (gate по self-che
 POST /api/reviews/{id}/decision          → approved | changes_requested (expert+)
 GET/POST /api/components                 → каталог компонентов
 POST /api/services/{id}/components       → подключить компонент
-POST /api/ai/draft | /api/ai/precheck    → AI-черновик / AI Gate (advisory)
+POST /api/ai/draft | /api/ai/precheck    → AI-черновик (AI-Buddy + KB, fallback шаблон) / AI Gate (advisory)
+POST /api/services/{sid}/artifacts/scaffold → скелеты обязательных артефактов (которых ещё нет)
 POST /api/integrations/backstage/import  → импорт из каталога (dry-run)
 GET  /api/integrations/services/{id}/catalog-export → catalog-info.yaml
 GET/POST /api/debts … /api/debts/{id}/status → реестр техдолга (BR-38…40)
@@ -109,7 +110,7 @@ GET  /api/dashboard | /api/audit
 
 ## Дорожная карта (следующие шаги)
 
-1. **AI-Buddy для остальных AI-сценариев** — AI-черновики и AI Gate (BR-28/29) пока на mock-эвристиках за тем же контрактом (`app/ai.py`); ассистент уже ходит в корпоративную LLM через `app/llm.py`.
+1. **AI-Buddy для остальных AI-сценариев** — AI-черновики уже ходят в корпоративную LLM (`app/ai.py` → `app/llm.py`, `reasoning_effort=low`); AI Gate (BR-29) пока на mock-эвристиках за тем же контрактом.
 2. **Real Confluence API** — прямая запись XHTML на страницу реестра долга (сейчас — копипаста через UI).
 3. **Backstage-коннектор** — реальный `catalog-info.yaml` из GitLab вместо mock.
 4. **DataGerry-коннектор** — ObjectTypes + матрица доступов (контур ИБ).

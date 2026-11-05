@@ -306,11 +306,27 @@ def ai_draft(body=Body(...), user=Depends(current_user)):
         raise HTTPException(404, "Сервис не найден")
     if not can_edit_service(user, svc):
         raise HTTPException(403, "Нет прав на этот сервис")
-    r = ai.draft_artifact(body.get("service_id"), body.get("kind"))
+    r = ai.draft_artifact(body.get("service_id"), body.get("kind"),
+                          model=(body.get("model") or "").strip())
     if not r:
         raise HTTPException(404, "Артефакт не найден")
-    audit(user, "ai_draft", f"service:{body.get('service_id')}/{body.get('kind')}", "mock")
+    audit(user, "ai_draft", f"service:{body.get('service_id')}/{body.get('kind')}",
+          f"provider:{r['provider']}")
     return r
+
+
+@router.post("/services/{sid}/artifacts/scaffold")
+def artifacts_scaffold(sid: int, user=Depends(current_user)):
+    """Скелеты (шаблоны стандарта) для обязательных артефактов, которые ещё пусты."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    created = factory.scaffold_missing(sid, user["username"])
+    if created:
+        audit(user, "artifacts_scaffold", f"service:{sid}", f"kinds:{','.join(created)}")
+    return {"created": created}
 
 
 @router.post("/ai/precheck")
@@ -734,9 +750,12 @@ def assistant(body=Body(...), user=Depends(current_user)):
     clean = [{"role": m.get("role"), "content": (m.get("content") or "")[:2000]}
              for m in history[-6:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
     model = (body.get("model") or "").strip()
+    service_id = body.get("service_id")
+    if service_id is not None and not isinstance(service_id, int):
+        raise HTTPException(400, "service_id должен быть числом")
     chat_id = _chat_session(user["id"], body.get("chat_id"), question)
     _chat_save(user["id"], chat_id, "user", question)
-    r = kb.answer(question, history=clean, model=model)
+    r = kb.answer(question, history=clean, model=model, service_id=service_id)
     _chat_save(user["id"], chat_id, "assistant", r["answer"], provider=r["provider"],
                model=r.get("model"), confidence=r.get("confidence"),
                citations=r.get("citations"))
@@ -762,12 +781,16 @@ def assistant_stream(body=Body(...), user=Depends(current_user)):
     clean = [{"role": m.get("role"), "content": (m.get("content") or "")[:2000]}
              for m in history[-6:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
     model = (body.get("model") or "").strip()
+    service_id = body.get("service_id")
+    if service_id is not None and not isinstance(service_id, int):
+        raise HTTPException(400, "service_id должен быть числом")
     chat_id = _chat_session(user["id"], body.get("chat_id"), question)
     _chat_save(user["id"], chat_id, "user", question)
 
     def gen():
         meta, parts = {}, []
-        for ev in kb.answer_stream(question, history=clean, model=model):
+        for ev in kb.answer_stream(question, history=clean, model=model,
+                                   service_id=service_id):
             if ev["type"] == "meta":
                 meta = ev
                 ev = {**ev, "chat_id": chat_id}   # клиент запоминает чат

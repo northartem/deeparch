@@ -8,9 +8,18 @@ MVP: provider="mock" — детерминированные эвристики �
 """
 import json
 from .db import q, q1
+from . import llm
+from .kb import retrieve
 from .standards import CHECKLIST_ITEMS, GRADES, ARTIFACT_KINDS, STANDARD_REF
 
 MIN_CONTENT = 200  # эвристика: артефакт содержательнее 200 символов
+
+DRAFT_SYSTEM = """Ты архитектурный ассистент компании ДАТС. Составь черновик архитектурного артефакта.
+Правила:
+1. Опирайся на требования стандарта (контекст ниже) и фактические данные сервиса. Структуру сохрани по шаблону.
+2. Всё, что выводится из данных сервиса, заполняй сразу; вместо неизвестного поставь [TODO: что уточнить].
+3. Формат: markdown, по-русски, без вступлений и прощаний — только содержимое артефакта.
+4. Это черновик: автор обязан проверить и подтвердить его (advisory, BR-33)."""
 
 
 def _artifact(service_id, kind):
@@ -47,12 +56,73 @@ def predict_checklist(service_id: int):
             "predictions": predictions, "issues": issues}
 
 
-def draft_artifact(service_id: int, kind: str):
-    """AI-черновик артефакта по шаблону стандарта (BR-28)."""
+def _service_facts(service_id: int, max_art: int = 400) -> str:
+    """Факты о сервисе для промпта: карточка, компоненты, состояние артефактов."""
+    svc = q1("SELECT * FROM services WHERE id=?", (service_id,))
+    comps = q("SELECT c.name, c.kind, c.status FROM components c "
+              "JOIN service_components sc ON sc.component_id=c.id "
+              "WHERE sc.service_id=? LIMIT 20", (service_id,))
+    arts = q("SELECT kind, content_md, diagram_code, source_url FROM artifacts "
+             "WHERE service_id=? ORDER BY kind", (service_id,))
+    lines = [f"Сервис: {svc['name']} ({svc['code']}), домен: {svc['domain'] or '—'}, "
+             f"тип проекта: {svc['project_type']}, жизненный цикл: {svc['lifecycle']}, "
+             f"владелец: {svc['owner'] or '—'}, архитектор: {svc['architect'] or '—'}."]
+    if comps:
+        lines.append("Компоненты: " + "; ".join(
+            f"{c['name']} ({c['kind']}, {c['status']})" for c in comps) + ".")
+    if arts:
+        lines.append("Артефакты сервиса:")
+        for a in arts:
+            filled = "заполнен" if (a["content_md"] or "").strip() else "пуст"
+            extra = ", есть диаграмма" if (a["diagram_code"] or "").strip() else ""
+            snippet = (a["content_md"] or "").strip()[:max_art]
+            lines.append(f"- {a['kind']} — {filled}{extra}."
+                         + (f" Начало содержания: {snippet}" if snippet else ""))
+    return "\n".join(lines)
+
+
+def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
+    """AI-черновик артефакта (BR-28): живой AI-Buddy по контексту сервиса и KB стандарта,
+    при недоступности LLM — детерминированный шаблон (fallback)."""
     svc = q1("SELECT * FROM services WHERE id=?", (service_id,))
     art = next((a for a in ARTIFACT_KINDS if a["kind"] == kind), None)
     if not svc or not art:
         return None
+    body = _mock_draft(svc, kind, art)
+    if not llm.configured():
+        return {"service_id": service_id, "kind": kind, "provider": "mock", "model": None,
+                "content_md": body,
+                "note": "Черновик по шаблону стандарта (LLM не подключена) — требует подтверждения автора (BR-28/BR-33)"}
+
+    # требования стандарта: релевантные чанки KB + спецификация артефакта
+    query = f"{art['title']}. {art['question']} {art['captures']}"
+    std_ctx = "\n\n".join(f"[{i}] {c['title']}: {c['chunk']}"
+                          for i, c in enumerate(retrieve(query, 3), 1))
+    user_prompt = (f"Спецификация артефакта «{art['title']}» (kind={kind}):\n"
+                   f"- Вопрос, на который отвечает артефакт: {art['question']}\n"
+                   f"- Что фиксирует: {art['captures']}\n"
+                   f"- Обязательные разделы/исходники: {', '.join(art['required_artifacts'])}\n"
+                   f"- Шаблон стандарта: {art['template_ref']}\n\n"
+                   f"Требования стандарта (KB):\n{std_ctx}\n\n"
+                   f"Факты о сервисе:\n{_service_facts(service_id)}\n\n"
+                   f"Составь черновик артефакта «{art['title']}» для сервиса {svc['code']}.")
+    try:
+        text = llm.chat([{"role": "system", "content": DRAFT_SYSTEM},
+                         {"role": "user", "content": user_prompt}],
+                        temperature=0.3, max_tokens=4000, model=model)
+        if not text.strip():
+            raise llm.LLMError("LLM вернула пустой ответ")
+        return {"service_id": service_id, "kind": kind, "provider": "ai-buddy",
+                "model": (model or "").strip() or llm.config()[2],
+                "content_md": text.strip(),
+                "note": "AI-черновик (AI-Buddy) — требует подтверждения автора (BR-28/BR-33)"}
+    except llm.LLMError as e:
+        return {"service_id": service_id, "kind": kind, "provider": "mock", "model": None,
+                "content_md": body,
+                "note": f"LLM недоступна ({e}) — черновик по шаблону стандарта; требует подтверждения автора (BR-28/BR-33)"}
+
+
+def _mock_draft(svc, kind: str, art) -> str:
     if kind == "vision_c4":
         body = f"""## Architecture Vision — {svc['name']} ({svc['code']})
 
@@ -114,5 +184,4 @@ def draft_artifact(service_id: int, kind: str):
 
 [TODO — заполните по шаблону] ({art['template_ref']})
 """
-    return {"service_id": service_id, "kind": kind, "provider": "mock",
-            "content_md": body, "note": "AI-generated draft — требует подтверждения автора (BR-28/BR-33)"}
+    return body
