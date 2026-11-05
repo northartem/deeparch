@@ -2,6 +2,7 @@
 import json
 import secrets
 from fastapi import APIRouter, HTTPException, Depends, Body, Header, Response
+from fastapi.responses import StreamingResponse
 from .db import q, q1, exec, now
 from .auth import current_user, verify_password
 from .roles import (GLOBAL_PERMS, has_global, user_groups, group_services,
@@ -643,6 +644,28 @@ def assistant(body=Body(...), user=Depends(current_user)):
 @router.get("/assistant/status")
 def assistant_status(user=Depends(current_user)):
     return kb.status()
+
+
+@router.post("/assistant/stream")
+def assistant_stream(body=Body(...), user=Depends(current_user)):
+    """Стриминг ответа ассистента (SSE): meta → delta* → done → [DONE]."""
+    question = (body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(400, "Нужен question")
+    history = body.get("history") or []
+    if not isinstance(history, list):
+        raise HTTPException(400, "history должен быть списком сообщений")
+    clean = [{"role": m.get("role"), "content": (m.get("content") or "")[:2000]}
+             for m in history[-6:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
+
+    def gen():
+        for ev in kb.answer_stream(question, history=clean):
+            yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 # ---------- MVP2: подключение LLM в админ-панели ----------

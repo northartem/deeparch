@@ -104,17 +104,11 @@ SYSTEM_PROMPT = """Ты — ассистент архитектора по ко�
 4. Ты работаешь в advisory-режиме: только объясняешь стандарт, никаких действий."""
 
 
-def answer(question: str, k: int = 4, history: list | None = None) -> dict:
-    """Ответ ассистента: LLM по контексту из базы знаний (или fallback) + цитаты.
-
-    history — предыдущий диалог [{role: user|assistant, content: str}]
-    для follow-up вопросов (используется только LLM-веткой).
-    """
+def _prep(question: str, k: int = 4):
+    """Поиск релевантных чанков + сборка контекста и цитат (общее для answer/answer_stream)."""
     hits = retrieve(question, k)
     if not hits:
-        return {"answer": "В базе знаний стандарта нет релевантного раздела. "
-                          "Уточните вопрос или откройте стандарт напрямую.",
-                "citations": [], "confidence": 0.0, "provider": "none"}
+        return None
     q = set(_tokenize(question))
     citations, seen, ctx = [], set(), []
     for n, c in enumerate(hits, 1):
@@ -125,19 +119,38 @@ def answer(question: str, k: int = 4, history: list | None = None) -> dict:
                         key=lambda s: len(q & set(_tokenize(s))), default="")
         ctx.append(f"[{n}] {c['title']} (pageId={c['page_id']}):\n{c['chunk']}"
                    + (f"\nРелевантный фрагмент: {best_sent}" if best_sent else ""))
+    return citations, ctx, q, hits
+
+
+def _llm_messages(question: str, ctx: list, history: list | None) -> list[dict]:
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    # последний диалог (максимум 6 реплик) — для follow-up вопросов
+    for m in (history or [])[-6:]:
+        role, content = m.get("role"), (m.get("content") or "").strip()
+        if role in ("user", "assistant") and content:
+            msgs.append({"role": role, "content": content[:2000]})
+    msgs.append({"role": "user", "content":
+            "Контекст из базы знаний стандарта:\n\n" + "\n\n".join(ctx)
+            + f"\n\nВопрос архитектора: {question}\n"
+              "Ответь на вопрос строго по контексту."})
+    return msgs
+
+
+def answer(question: str, k: int = 4, history: list | None = None) -> dict:
+    """Ответ ассистента: LLM по контексту из базы знаний (или fallback) + цитаты.
+
+    history — предыдущий диалог [{role: user|assistant, content: str}]
+    для follow-up вопросов (используется только LLM-веткой).
+    """
+    prep = _prep(question, k)
+    if prep is None:
+        return {"answer": "В базе знаний стандарта нет релевантного раздела. "
+                          "Уточните вопрос или откройте стандарт напрямую.",
+                "citations": [], "confidence": 0.0, "provider": "none"}
+    citations, ctx, q, hits = prep
     if llm.configured():
         try:
-            msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
-            # последний диалог (максимум 6 реплик) — для follow-up вопросов
-            for m in (history or [])[-6:]:
-                role, content = m.get("role"), (m.get("content") or "").strip()
-                if role in ("user", "assistant") and content:
-                    msgs.append({"role": role, "content": content[:2000]})
-            msgs.append({"role": "user", "content":
-                    "Контекст из базы знаний стандарта:\n\n" + "\n\n".join(ctx)
-                    + f"\n\nВопрос архитектора: {question}\n"
-                      "Ответь на вопрос строго по контексту."})
-            text = llm.chat(msgs)
+            text = llm.chat(_llm_messages(question, ctx, history))
             return {"answer": text.strip(), "citations": citations,
                     "confidence": 0.9, "provider": "ai-buddy",
                     "model": llm.config()[2]}
@@ -152,6 +165,55 @@ def answer(question: str, k: int = 4, history: list | None = None) -> dict:
     confidence = round(min(1.0, len(q & set(_tokenize(text))) / max(3, len(q))), 2) if q else 0.0
     return {"answer": note + "\n\n" + text if note else text,
             "citations": citations, "confidence": confidence, "provider": "local-rag"}
+
+
+def answer_stream(question: str, k: int = 4, history: list | None = None):
+    """Стриминговая версия answer(): генератор событий для SSE.
+
+    События: {"type":"meta", provider, model, confidence, citations}
+             {"type":"delta", text}          — дельта ответа
+             {"type":"done"}
+    Fallback при ошибке LLM / без конфигурации: извлекающий ответ одной дельтой.
+    """
+    prep = _prep(question, k)
+    if prep is None:
+        yield {"type": "meta", "provider": "none", "model": None,
+               "confidence": 0.0, "citations": []}
+        yield {"type": "delta", "text": "В базе знаний стандарта нет релевантного раздела. "
+                                        "Уточните вопрос или откройте стандарт напрямую."}
+        yield {"type": "done"}
+        return
+    citations, ctx, q, hits = prep
+    if llm.configured():
+        url_, _tok, model = llm.config()
+        yield {"type": "meta", "provider": "ai-buddy", "model": model,
+               "confidence": 0.9, "citations": citations}
+        full = []
+        try:
+            for delta in llm.chat_stream(_llm_messages(question, ctx, history)):
+                full.append(delta)
+                yield {"type": "delta", "text": delta}
+            if full:
+                yield {"type": "done"}
+                return
+            yield {"type": "delta", "text": "\n\n⚠ LLM вернула пустой ответ — "
+                                            "извлекающий ответ из базы знаний:"}
+        except llm.LLMError as e:
+            yield {"type": "delta",
+                   "text": (f"\n\n⚠ LLM недоступна ({e}) — извлекающий ответ из базы знаний:")
+                   if full else f"⚠ LLM недоступна ({e}) — извлекающий ответ из базы знаний:"}
+    else:
+        yield {"type": "meta", "provider": "local-rag", "model": None,
+               "confidence": None, "citations": citations}
+        yield {"type": "delta",
+               "text": "⚠ AI-Buddy не подключён (подключите в админ-панели → Интеграции) — "
+                       "пока извлекающий ответ из базы знаний:\n\n"}
+    text = _extractive(question, hits)
+    confidence = round(min(1.0, len(q & set(_tokenize(text))) / max(3, len(q))), 2) if q else 0.0
+    yield {"type": "delta", "text": text}
+    yield {"type": "meta", "provider": "local-rag", "model": None,
+           "confidence": confidence, "citations": citations}
+    yield {"type": "done"}
 
 
 def status() -> dict:

@@ -11,6 +11,7 @@
 При отсутствии конфигурации или ошибке сети вызывающий код откатывается
 на локальный извлекающий ответ из базы знаний (fallback в kb.py).
 """
+import json
 import os
 import httpx
 from .db import q, q1, exec, now
@@ -124,6 +125,42 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900) 
         raise LLMError(f"AI-Buddy недоступен: {e.__class__.__name__}") from e
     except (KeyError, IndexError, ValueError) as e:
         raise LLMError(f"Неожиданный формат ответа AI-Buddy: {e}") from e
+
+
+def chat_stream(messages: list[dict], temperature: float = 0.2, max_tokens: int = 900):
+    """Стриминг ответа: генератор дельт текста (OpenAI stream=true, SSE).
+
+    Бросает LLMError при отсутствии конфигурации / сетевой ошибке / HTTP-ошибке.
+    """
+    url, token, model = config()
+    if not (url and token):
+        raise LLMError("AI-Buddy не сконфигурирован (админ-панель → Интеграции)")
+    try:
+        with httpx.stream(
+                "POST", f"{url}/chat/completions",
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"},
+                json={"model": model, "messages": messages,
+                      "temperature": temperature, "max_tokens": max_tokens,
+                      "stream": True},
+                timeout=TIMEOUT) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(data)["choices"][0]["delta"].get("content")
+                except (KeyError, IndexError, ValueError):
+                    continue
+                if delta:
+                    yield delta
+    except httpx.HTTPStatusError as e:
+        raise LLMError(f"HTTP {e.response.status_code}: {e.response.read()[:200]!r}") from e
+    except httpx.HTTPError as e:
+        raise LLMError(f"AI-Buddy недоступен: {e.__class__.__name__}") from e
 
 
 def test_connection(url: str = "", token: str = "", model: str = "") -> dict:

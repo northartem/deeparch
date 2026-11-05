@@ -778,20 +778,119 @@ async function askAssistant(){
   CHAT.push({role:'user', text:question});
   box.value = ''; chatAutogrow(box);
   CHAT_BUSY = true; $('#send-btn').disabled = true;
-  renderChat(true);
-  try{
-    const r = await api('/assistant', {method:'POST', body: JSON.stringify({
-      question,
-      history: CHAT.slice(0, -1).map(m => ({role: m.role === 'bot' ? 'assistant' : 'user',
-                                            content: m.text}))})});
-    CHAT.push({role:'bot', text:r.answer, provider:r.provider, model:r.model,
-               confidence:r.confidence, citations:r.citations});
-  }catch(e){
-    CHAT.push({role:'bot', text:`⚠ ${e.message}`, provider:'none', confidence:0});
-  }
-  sessionStorage.setItem(CHAT_KEY, JSON.stringify(CHAT.slice(-40)));
+  renderChat(true);   // индикатор набора, пока летит запрос
+  const history = CHAT.slice(0, -1).map(m => ({role: m.role === 'bot' ? 'assistant' : 'user',
+                                               content: m.text}));
+  const ok = await chatStream(question, history);
+  if(!ok) await chatFallback(question, history);
   CHAT_BUSY = false; if($('#send-btn')) $('#send-btn').disabled = false;
   renderChat();
+}
+
+/* Стриминговый ответ: SSE от /assistant/stream + посимвольная «допечатка».
+   Возвращает true, если стриминг состоялся. */
+async function chatStream(question, history){
+  let resp;
+  try{
+    resp = await fetch('/api/assistant/stream', {
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'X-Token': localStorage.token||''},
+      body: JSON.stringify({question, history})});
+  }catch{ return false; }
+  if(!resp.ok || !resp.body) return false;
+
+  const log = $('#chat-log'); if(!log) return false;
+  let settle; const finished = new Promise(r => settle = r);   // resolve в finalize()
+
+  const msg = {role:'bot', text:'', provider:'ai-buddy', model:null,
+               confidence:0, citations:[]};
+  const node = document.createElement('div');
+  node.className = 'msg bot';
+  node.innerHTML = `<div class="avatar">▲</div><div class="body">
+    <div class="bot-text streaming"></div></div>`;
+  // узел добавляется в лог при первой дельте — до этого виден typing-индикатор
+  const txtEl = node.querySelector('.bot-text');
+
+  let full = '', shown = 0, metaDone = false, streamEnd = false, failed = false, pumpStarted = false;
+  const sc = $('#chat-scroll');
+  const nearBottom = () => sc.scrollHeight - sc.scrollTop - sc.clientHeight < 110;
+
+  const finalize = () => {
+    msg.text = full; msg.streaming = false;
+    CHAT.push(msg);
+    sessionStorage.setItem(CHAT_KEY, JSON.stringify(CHAT.slice(-40)));
+    settle(true);
+  };
+  const applyMeta = m => {
+    if(m.provider !== undefined) msg.provider = m.provider;
+    if(m.model !== undefined) msg.model = m.model;
+    if(m.confidence !== undefined && m.confidence !== null) msg.confidence = m.confidence;
+    if(m.citations) msg.citations = m.citations;
+    metaDone = true;
+  };
+  const pump = () => {
+    if(shown < full.length){
+      // адаптивный шаг: плавно догоняем поток без рывков
+      const step = Math.max(2, Math.ceil((full.length - shown) / 10));
+      shown = Math.min(full.length, shown + step);
+      txtEl.textContent = full.slice(0, shown) + '▍';
+      if(nearBottom()) sc.scrollTop = sc.scrollHeight;
+    }
+    if(streamEnd && shown >= full.length){ finalize(); return; }
+    requestAnimationFrame(pump);
+  };
+  const handle = ev => {
+    if(ev.type === 'meta') applyMeta(ev);
+    else if(ev.type === 'delta'){
+      if(!metaDone) applyMeta({provider:'local-rag', model:null, confidence:0, citations:[]});
+      full += ev.text;
+      if(!pumpStarted){
+        pumpStarted = true;
+        const t = document.getElementById('typing'); if(t) t.remove();
+        log.appendChild(node);
+        requestAnimationFrame(pump);
+      }
+    } else if(ev.type === 'done') streamEnd = true;
+  };
+
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  try{
+    while(true){
+      const {done:rd, value} = await reader.read();
+      if(rd){ streamEnd = true; break; }
+      buf += dec.decode(value, {stream:true});
+      let idx;
+      while((idx = buf.indexOf('\n\n')) >= 0){
+        const part = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        if(!part.startsWith('data:')) continue;
+        const payload = part.slice(5).trim();
+        if(payload === '[DONE]'){ streamEnd = true; continue; }
+        try{ handle(JSON.parse(payload)); }catch{ /* пропуск битого события */ }
+      }
+    }
+  }catch{ failed = true; }
+  if(!pumpStarted){
+    return false;      // ответ не пришёл стримом → обычный запрос (узел не добавлялся)
+  }
+  if(failed) streamEnd = true;   // соединение оборвалось — дорисовываем что есть
+  await finished;      // ждём, пока допечатка завершится и сообщение попадёт в CHAT
+  return true;
+}
+
+/* Fallback: обычный запрос к /assistant (если стриминг недоступен) */
+async function chatFallback(question, history){
+  const msg = {role:'bot', text:'', provider:'local-rag', model:null, confidence:0, citations:[]};
+  try{
+    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question, history})});
+    msg.text = r.answer; msg.provider = r.provider; msg.model = r.model;
+    msg.confidence = r.confidence; msg.citations = r.citations || [];
+  }catch(e){
+    msg.text = `⚠ ${e.message}`; msg.provider = 'none';
+  }
+  CHAT.push(msg);
+  sessionStorage.setItem(CHAT_KEY, JSON.stringify(CHAT.slice(-40)));
 }
 
 /* ---------- ролевая модель (Доступ) ---------- */
