@@ -178,6 +178,29 @@ function liveDiagram(el){
   clearTimeout(_deb[id]);
   _deb[id] = setTimeout(()=>renderDiag(document.getElementById(kind), el.value), 700);
 }
+// В diagram_code может лежать несколько диаграмм подряд (напр. C4Context + C4Container).
+// Разбиваем на отдельные блоки по заголовкам типов — Mermaid принимает один исходник за раз.
+const DIAG_HEAD_RE = /^(C4Context|C4Container|C4Deployment|C4Component|C4Dynamic|erDiagram|flowchart|sequenceDiagram|classDiagram|stateDiagram|graph|gantt|pie|mindmap|timeline|gitGraph|journey)\b/;
+const DIAG_TITLES = {
+  C4Context:'C4 L1 — Контекст', C4Container:'C4 L2 — Контейнеры',
+  C4Deployment:'C4 — Deployment', C4Component:'C4 L3 — Компоненты', C4Dynamic:'C4 — Dynamic',
+  erDiagram:'ER — модель данных', flowchart:'Flowchart', sequenceDiagram:'Sequence',
+  classDiagram:'Class diagram', stateDiagram:'State diagram',
+};
+function splitDiagrams(code){
+  const blocks = []; let cur = null;
+  for(const ln of code.split('\n')){
+    const m = ln.trim().match(DIAG_HEAD_RE);
+    if(m){
+      if(cur) blocks.push(cur);
+      cur = {type: m[1], code: ln};
+    } else if(cur){
+      cur.code += '\n' + ln;
+    }
+  }
+  if(cur) blocks.push(cur);
+  return blocks.filter(b=>b.code.trim());
+}
 async function renderDiag(el, code){
   if(!el) return;
   if(!window.mermaid){ el.innerHTML = '<span class="mut small">Mermaid не загрузился</span>'; return; }
@@ -185,13 +208,26 @@ async function renderDiag(el, code){
     el.innerHTML = '<div class="empty">Исходник диаграммы не задан.<br>Стандарт требует хранить исходники (dsl/json/mermaid) — вставьте Mermaid-код слева.</div>';
     return;
   }
-  try{
-    const {svg} = await mermaid.render('m'+Math.random().toString(36).slice(2), code.trim());
-    el.classList.remove('diag-err'); el.innerHTML = svg;
-  }catch(e){
-    el.classList.add('diag-err');
-    el.innerHTML = `<div class="small" style="color:var(--bad)">⚠ Ошибка синтаксиса Mermaid: ${esc(String(e.message||e)).slice(0,220)}</div>`;
+  const blocks = splitDiagrams(code);
+  if(!blocks.length){
+    el.innerHTML = '<div class="empty">Исходник диаграммы не задан.</div>';
+    return;
   }
+  const multi = blocks.length > 1;
+  el.classList.toggle('diag-stack', multi);
+  const parts = []; let bad = false;
+  for(const b of blocks){
+    try{
+      const {svg} = await mermaid.render('m'+Math.random().toString(36).slice(2), b.code.trim());
+      const cap = multi ? `<div class="small mut" style="margin-bottom:6px">${esc(DIAG_TITLES[b.type] || b.type)}</div>` : '';
+      parts.push(`<div style="flex:0 0 auto;max-width:100%;margin-bottom:14px">${cap}${svg}</div>`);
+    }catch(e){
+      bad = true;
+      parts.push(`<div class="small" style="color:var(--bad)">⚠ Ошибка синтаксиса Mermaid${multi ? ` (${DIAG_TITLES[b.type] || b.type})` : ''}: ${esc(String(e.message||e)).slice(0,220)}</div>`);
+    }
+  }
+  el.classList.toggle('diag-err', bad);
+  el.innerHTML = parts.join('');
 }
 function tabDiagrams(s){
   const arts = S.standard.artifacts;
