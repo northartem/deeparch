@@ -626,32 +626,49 @@ def factory_scaffold(body=Body(...), user=Depends(current_user)):
 
 # ---------- MVP2: RAG-ассистент (BR-48…50) ----------
 
-def _chat_save(user_id: int, role: str, content: str, provider: str | None = None,
-               model: str | None = None, confidence: float | None = None,
-               citations: list | None = None):
-    """Сохранение реплики в историю чата пользователя (+ обрезка хвоста).
+def _chat_session(user_id: int, chat_id, first_text: str) -> int:
+    """Id чата-сессии пользователя: существующий (проверка владельца) или новый.
+
+    Новый чат получает title из первого вопроса.
+    """
+    if chat_id:
+        r = q1("SELECT id FROM chat_sessions WHERE id=? AND user_id=?", (chat_id, user_id))
+        if r:
+            exec("UPDATE chat_sessions SET updated_at=? WHERE id=?", (now(), r["id"]))
+            return r["id"]
+    return exec("INSERT INTO chat_sessions(user_id,title,created_at,updated_at) "
+                "VALUES(?,?,?,?)",
+                (user_id, (first_text or "Новый чат")[:80], now(), now()))
+
+
+def _chat_save(user_id: int, chat_id: int, role: str, content: str,
+               provider: str | None = None, model: str | None = None,
+               confidence: float | None = None, citations: list | None = None):
+    """Сохранение реплики в чат (+ обрезка хвоста до 200 сообщений).
 
     Повторный user-вопрос в течение 10 секунд не дублируется
     (случай fallback-запроса после оборвавшегося стрима).
     """
     if role == "user":
-        last = q1("SELECT role, content FROM chat_messages WHERE user_id=? "
-                  "AND created_at > ? ORDER BY id DESC LIMIT 1",
-                  (user_id, now() - 10))
+        last = q1("SELECT role, content FROM chat_messages WHERE session_id=? "
+                  "AND created_at > ? ORDER BY id DESC LIMIT 1", (chat_id, now() - 10))
         if last and last["role"] == "user" and last["content"] == content:
             return
-    exec("INSERT INTO chat_messages(user_id,role,content,provider,model,confidence,"
-         "citations,created_at) VALUES(?,?,?,?,?,?,?,?)",
-         (user_id, role, content[:8000], provider, model, confidence,
+    exec("INSERT INTO chat_messages(session_id,user_id,role,content,provider,model,"
+         "confidence,citations,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+         (chat_id, user_id, role, content[:8000], provider, model, confidence,
           json.dumps(citations, ensure_ascii=False) if citations else None, now()))
-    exec("DELETE FROM chat_messages WHERE user_id=? AND id NOT IN "
-         "(SELECT id FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 200)",
-         (user_id, user_id))
+    exec("DELETE FROM chat_messages WHERE session_id=? AND id NOT IN "
+         "(SELECT id FROM chat_messages WHERE session_id=? ORDER BY id DESC LIMIT 200)",
+         (chat_id, chat_id))
+    exec("DELETE FROM chat_messages WHERE session_id=? AND id NOT IN "
+         "(SELECT id FROM chat_messages WHERE session_id=? ORDER BY id DESC LIMIT 200)",
+         (chat_id, chat_id))
 
 
-def _chat_history(user_id: int, limit: int = 40) -> list[dict]:
-    rows = q("SELECT * FROM chat_messages WHERE user_id=? "
-             "ORDER BY id DESC LIMIT ?", (user_id, limit))
+def _chat_history(session_id: int, limit: int = 200) -> list[dict]:
+    rows = q("SELECT * FROM chat_messages WHERE session_id=? "
+             "ORDER BY id DESC LIMIT ?", (session_id, limit))
     out = []
     for r in reversed(rows):
         try:
@@ -664,14 +681,35 @@ def _chat_history(user_id: int, limit: int = 40) -> list[dict]:
     return out
 
 
+@router.get("/assistant/chats")
+def assistant_chats(user=Depends(current_user)):
+    """Список чатов пользователя для левой панели."""
+    rows = q("SELECT id, title, updated_at FROM chat_sessions WHERE user_id=? "
+             "ORDER BY updated_at DESC LIMIT 50", (user["id"],))
+    return {"chats": rows}
+
+
+@router.delete("/assistant/chats/{chat_id}")
+def assistant_chat_delete(chat_id: int, user=Depends(current_user)):
+    exec("DELETE FROM chat_messages WHERE session_id=? AND user_id=?", (chat_id, user["id"]))
+    exec("DELETE FROM chat_sessions WHERE id=? AND user_id=?", (chat_id, user["id"]))
+    return {"ok": True}
+
+
 @router.get("/assistant/history")
-def assistant_history(user=Depends(current_user)):
-    return {"messages": _chat_history(user["id"])}
+def assistant_history(chat_id: int = 0, user=Depends(current_user)):
+    if not chat_id:
+        return {"messages": []}
+    own = q1("SELECT id FROM chat_sessions WHERE id=? AND user_id=?", (chat_id, user["id"]))
+    if not own:
+        raise HTTPException(404, "Чат не найден")
+    return {"messages": _chat_history(chat_id)}
 
 
 @router.delete("/assistant/history")
 def assistant_history_clear(user=Depends(current_user)):
     exec("DELETE FROM chat_messages WHERE user_id=?", (user["id"],))
+    exec("DELETE FROM chat_sessions WHERE user_id=?", (user["id"],))
     return {"ok": True}
 
 
@@ -696,12 +734,14 @@ def assistant(body=Body(...), user=Depends(current_user)):
     clean = [{"role": m.get("role"), "content": (m.get("content") or "")[:2000]}
              for m in history[-6:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
     model = (body.get("model") or "").strip()
-    _chat_save(user["id"], "user", question)
+    chat_id = _chat_session(user["id"], body.get("chat_id"), question)
+    _chat_save(user["id"], chat_id, "user", question)
     r = kb.answer(question, history=clean, model=model)
-    _chat_save(user["id"], "assistant", r["answer"], provider=r["provider"],
+    _chat_save(user["id"], chat_id, "assistant", r["answer"], provider=r["provider"],
                model=r.get("model"), confidence=r.get("confidence"),
                citations=r.get("citations"))
     r["mode"] = "advisory"   # BR-33: решение за человеком
+    r["chat_id"] = chat_id
     return r
 
 
@@ -722,19 +762,21 @@ def assistant_stream(body=Body(...), user=Depends(current_user)):
     clean = [{"role": m.get("role"), "content": (m.get("content") or "")[:2000]}
              for m in history[-6:] if isinstance(m, dict) and m.get("role") in ("user", "assistant")]
     model = (body.get("model") or "").strip()
-    _chat_save(user["id"], "user", question)
+    chat_id = _chat_session(user["id"], body.get("chat_id"), question)
+    _chat_save(user["id"], chat_id, "user", question)
 
     def gen():
         meta, parts = {}, []
         for ev in kb.answer_stream(question, history=clean, model=model):
             if ev["type"] == "meta":
                 meta = ev
+                ev = {**ev, "chat_id": chat_id}   # клиент запоминает чат
             elif ev["type"] == "delta":
                 parts.append(ev["text"])
             yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
         text = "".join(parts)
         if text:
-            _chat_save(user["id"], "assistant", text, provider=meta.get("provider"),
+            _chat_save(user["id"], chat_id, "assistant", text, provider=meta.get("provider"),
                        model=meta.get("model"), confidence=meta.get("confidence"),
                        citations=meta.get("citations"))
         yield "data: [DONE]\n\n"

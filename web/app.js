@@ -667,6 +667,7 @@ async function nfrSave(mid){
 /* ---------- MVP2: AI-ассистент по стандарту (BR-48…50) — чат в стиле ChatGPT ---------- */
 const PROVIDER_RU = {'ai-buddy': 'AI-Buddy (корпоративная LLM)', 'local-rag': 'локальная база знаний (LLM не подключена)', 'none': ''};
 let CHAT = [];            // [{role:'user'|'bot', text, provider, model, confidence, citations}]
+let CHAT_ID = null;       // id текущего чата-сессии на сервере (null = новый чат)
 let CHAT_BUSY = false;
 
 const CHAT_SUGGESTIONS = [
@@ -712,45 +713,79 @@ function chatModelPick(){
   if(s && s.value) localStorage.setItem(CHAT_MODEL_KEY, s.value);
 }
 
-async function viewAssistant(){
-  let st = {provider:'local-rag', kb_pages:'…', kb_chunks:''};
-  try{ st = await api('/assistant/status'); }catch{}
+async function loadChats(){
+  // список чатов пользователя для левой панели
   try{
-    const h = await api('/assistant/history');
-    CHAT = (h.messages || []).map(m => ({
+    const r = await api('/assistant/chats');
+    const el = $('#chat-list'); if(!el) return;
+    el.innerHTML = (r.chats || []).map(c => `
+      <div class="chat-item${c.id === CHAT_ID ? ' active' : ''}" onclick="chatOpen(${c.id})" title="${esc(c.title||'')}">
+        <span class="chat-item-title">${esc(c.title || 'Чат')}</span>
+        <span class="chat-item-del" onclick="event.stopPropagation(); chatDelete(${c.id})" title="Удалить чат">✕</span>
+      </div>`).join('');
+  }catch{ /* нет доступа — панель пустая */ }
+}
+
+async function chatOpen(id){
+  if(CHAT_BUSY) return;
+  try{
+    const r = await api('/assistant/history?chat_id=' + id);
+    CHAT_ID = id;
+    CHAT = (r.messages || []).map(m => ({
       role: m.role === 'assistant' ? 'bot' : 'user',
       text: m.content, provider: m.provider, model: m.model,
       confidence: m.confidence, citations: m.citations || []}));
-  }catch{ CHAT = []; }
+    renderChat(); loadChats();
+  }catch{}
+}
+
+async function chatDelete(id){
+  if(CHAT_BUSY) return;
+  try{ await api('/assistant/chats/' + id, {method:'DELETE'}); }catch{}
+  if(CHAT_ID === id){ CHAT_ID = null; CHAT = []; renderChat(); }
+  loadChats();
+}
+
+async function viewAssistant(){
+  let st = {provider:'local-rag', kb_pages:'…', kb_chunks:''};
+  try{ st = await api('/assistant/status'); }catch{}
   const badge = st.provider === 'ai-buddy'
     ? `<span class="badge b-approved">● AI-Buddy</span>`
     : `<span class="badge b-in_review">● fallback: локальная база знаний</span>`;
   $('#view').innerHTML = `
-  <div class="chat-wrap">
-    <div class="chat-head">
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <b style="font-size:15px">AI-ассистент стандарта</b>${badge}
-        <span class="chip small">база знаний: ${st.kb_pages} стр · ${st.kb_chunks} чанков</span>
+  <div class="chat-shell">
+    <aside class="chat-side">
+      <button class="chat-new-btn" onclick="chatNew()">＋ Новый чат</button>
+      <div class="chat-list" id="chat-list"></div>
+    </aside>
+    <div class="chat-wrap">
+      <div class="chat-head">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <b style="font-size:15px">AI-ассистент стандарта</b>${badge}
+          <span class="chip small">база знаний: ${st.kb_pages} стр · ${st.kb_chunks} чанков</span>
+        </div>
       </div>
-      <button class="sec" onclick="chatNew()">＋ Новый чат</button>
-    </div>
-    <div class="chat-scroll" id="chat-scroll"><div class="chat-log" id="chat-log"></div></div>
-    <div class="composer">
-      <div class="composer-box">
-        <textarea id="q" rows="1" placeholder="Спросите про стандарт — артефакты, ревью, техдолг, fitness…"
-          onkeydown="chatKeydown(event)" oninput="chatAutogrow(this)"></textarea>
-        <select id="chat-model" class="chat-model" style="display:none"
-          onchange="chatModelPick()" title="Модель LLM"></select>
-        <button class="send-btn" id="send-btn" onclick="askAssistant()" title="Отправить (Enter)">↑</button>
+      <div class="chat-scroll" id="chat-scroll"><div class="chat-log" id="chat-log"></div></div>
+      <div class="composer">
+        <div class="composer-box">
+          <textarea id="q" rows="1" placeholder="Спросите про стандарт — артефакты, ревью, техдолг, fitness…"
+            onkeydown="chatKeydown(event)" oninput="chatAutogrow(this)"></textarea>
+          <select id="chat-model" class="chat-model" style="display:none"
+            onchange="chatModelPick()" title="Модель LLM"></select>
+          <button class="send-btn" id="send-btn" onclick="askAssistant()" title="Отправить (Enter)">↑</button>
+        </div>
+        <p class="small mut" style="text-align:center;margin-top:8px">
+          Advisory-режим (BR-33): ассистент ничего не меняет, решение за человеком.
+          Ответы генерируются по страницам стандарта, но могут содержать неточности — проверяйте по первоисточнику.</p>
       </div>
-      <p class="small mut" style="text-align:center;margin-top:8px">
-        Advisory-режим (BR-33): ассистент ничего не меняет, решение за человеком.
-        Ответы генерируются по страницам стандарта, но могут содержать неточности — проверяйте по первоисточнику.</p>
     </div>
   </div>`;
-  renderChat();
+  const chats = await api('/assistant/chats').catch(() => ({chats: []}));
+  if((chats.chats || []).length) await chatOpen(chats.chats[0].id);   // последний чат
+  else renderChat();
   $('#q').focus();
   chatLoadModels();
+  loadChats();
 }
 
 function chatMsgHtml(m){
@@ -789,11 +824,9 @@ function renderChat(typing=false){
   sc.scrollTop = (CHAT.length || typing) ? sc.scrollHeight : 0;
 }
 
-async function chatNew(){
+function chatNew(){
   if(CHAT_BUSY) return;
-  CHAT = [];
-  try{ await api('/assistant/history', {method:'DELETE'}); }catch{}
-  renderChat(); $('#q').focus();
+  CHAT_ID = null; CHAT = []; renderChat(); loadChats(); $('#q').focus();
 }
 function chatKeydown(e){
   if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); askAssistant(); }
@@ -820,6 +853,7 @@ async function askAssistant(){
   if(!ok) await chatFallback(question, history, model);
   CHAT_BUSY = false; if($('#send-btn')) $('#send-btn').disabled = false;
   renderChat();
+  loadChats();   // новый чат появился в списке / обновился порядок
 }
 
 /* Стриминговый ответ: SSE от /assistant/stream + посимвольная «допечатка».
@@ -830,7 +864,7 @@ async function chatStream(question, history, model){
     resp = await fetch('/api/assistant/stream', {
       method:'POST',
       headers:{'Content-Type':'application/json', 'X-Token': localStorage.token||''},
-      body: JSON.stringify({question, history, model})});
+      body: JSON.stringify({question, history, model, chat_id: CHAT_ID})});
   }catch{ return false; }
   if(!resp.ok || !resp.body) return false;
 
@@ -856,6 +890,7 @@ async function chatStream(question, history, model){
     settle(true);
   };
   const applyMeta = m => {
+    if(m.chat_id) CHAT_ID = m.chat_id;
     if(m.provider !== undefined) msg.provider = m.provider;
     if(m.model !== undefined) msg.model = m.model;
     if(m.confidence !== undefined && m.confidence !== null) msg.confidence = m.confidence;
@@ -917,9 +952,10 @@ async function chatStream(question, history, model){
 async function chatFallback(question, history, model){
   const msg = {role:'bot', text:'', provider:'local-rag', model:null, confidence:0, citations:[]};
   try{
-    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question, history, model})});
+    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question, history, model, chat_id: CHAT_ID})});
     msg.text = r.answer; msg.provider = r.provider; msg.model = r.model;
     msg.confidence = r.confidence; msg.citations = r.citations || [];
+    if(r.chat_id) CHAT_ID = r.chat_id;
   }catch(e){
     msg.text = `⚠ ${e.message}`; msg.provider = 'none';
   }

@@ -150,8 +150,17 @@ CREATE TABLE IF NOT EXISTS app_settings (    -- MVP2: настройки пла�
   value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS chat_sessions (   -- MVP2: чаты пользователя (список слева)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  title TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS chat_messages (   -- MVP2: история чата ассистента (по пользователю)
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id INTEGER NOT NULL REFERENCES chat_sessions(id),
   user_id INTEGER NOT NULL REFERENCES users(id),
   role TEXT NOT NULL,                        -- 'user' | 'assistant'
   content TEXT NOT NULL,
@@ -239,4 +248,7 @@ def init_db():
     ucols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "password_hash" not in ucols:
         conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+    mcols = [r["name"] for r in conn.execute("PRAGMA table_info(chat_messages)").fetchall()]
+    if mcols and "session_id" not in mcols:
+        conn.execute("ALTER TABLE chat_messages ADD COLUMN session_id INTEGER")
     conn.commit()
