@@ -1,7 +1,7 @@
 """REST API MVP DeepArch (BR-01…13 ядро + BR-14…27 фундамент + RBAC)."""
 import json
 import secrets
-from fastapi import APIRouter, HTTPException, Depends, Body, Header
+from fastapi import APIRouter, HTTPException, Depends, Body, Header, Response
 from .db import q, q1, exec, now
 from .auth import current_user, verify_password
 from .roles import (GLOBAL_PERMS, has_global, user_groups, group_services,
@@ -11,7 +11,7 @@ from .standards import (STANDARD_NAME, STANDARD_REF, ARTIFACT_KINDS, CHECKLIST_I
                         COMPONENT_KINDS, COMPONENT_STATUSES,
                         DEBT_TYPES, DEBT_STATUSES, DEBT_RISKS, DEBT_PRIORITIES)
 from .debts import gen_debt_id
-from . import ai, integrations
+from . import ai, integrations, fitness, factory, nfr, kb
 from .seed import seed, demo_vision_template
 
 router = APIRouter(prefix="/api")
@@ -123,6 +123,10 @@ def get_service(sid: int, user=Depends(current_user)):
                               WHERE sc.service_id=?""", (sid,))
     last = q1("SELECT answers FROM checklist_runs WHERE service_id=? ORDER BY created_at DESC LIMIT 1", (sid,))
     svc["last_answers"] = json.loads(last["answers"]) if last and last["answers"] else []
+    svc["nfr"] = nfr.validate(sid)                       # MVP2 BR-51…53
+    run = q1("SELECT id,passed,failed,warned,created_by,created_at FROM fitness_runs"
+             " WHERE service_id=? ORDER BY created_at DESC LIMIT 1", (sid,))
+    svc["fitness_last"] = dict(run) if run else None     # MVP2 BR-42
     return svc
 
 
@@ -564,3 +568,118 @@ def set_role(username: str, body=Body(...), user=Depends(current_user)):
     exec("UPDATE users SET role=? WHERE username=?", (role, username))
     audit(user, "set_role", f"user:{username}", f"{u['role']} → {role}")
     return {"ok": True, "role": role}
+
+
+# ---------- MVP2: fitness functions (BR-41…44) ----------
+
+@router.get("/fitness/rules")
+def fitness_rules(user=Depends(current_user)):
+    return [dict(r) for r in q("SELECT * FROM fitness_rules WHERE active=1 ORDER BY id")]
+
+
+@router.post("/services/{sid}/fitness")
+def run_fitness(sid: int, user=Depends(current_user)):
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    result = fitness.run_fitness(svc, user)
+    audit(user, "fitness_run", f"service:{svc['code']}",
+          f"pass:{result['passed']} fail:{result['failed']} warn:{result['warned']}")
+    return result
+
+
+@router.get("/services/{sid}/fitness/ci.txt")
+def fitness_ci(sid: int, user=Depends(current_user)):
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    yaml, python = fitness.ci_pack(svc)
+    pack = (f"# gitlab-ci (скопируйте в .gitlab-ci.yml)\n{yaml}\n"
+            "# fitness/<code>_check.py (автономный скрипт)\n" + python)
+    return Response(pack, media_type="text/plain; charset=utf-8",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="fitness_{svc["code"].lower()}.txt"'})
+
+
+# ---------- MVP2: Service Factory (BR-45…47) ----------
+
+@router.post("/factory/scaffold")
+def factory_scaffold(body=Body(...), user=Depends(current_user)):
+    if user["role"] not in ("admin", "domain_expert", "team_lead"):
+        raise HTTPException(403, "Скаффолдинг: team_lead, domain_expert, admin")
+    code = (body.get("code") or "").strip().upper()
+    if not code or not body.get("name"):
+        raise HTTPException(400, "Нужны code и name")
+    try:
+        r = factory.scaffold(code, body["name"].strip(), body.get("domain"),
+                             body.get("project_type") or "mvp",
+                             body.get("owner") or user["username"],
+                             body.get("architect"), user["username"],
+                             body.get("lifecycle") or "design")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    audit(user, "factory_scaffold", f"service:{code}",
+          f"artifacts:{r['artifacts']} components:{len(r['components_attached'])}")
+    return r
+
+
+# ---------- MVP2: RAG-ассистент (BR-48…50) ----------
+
+@router.post("/assistant")
+def assistant(body=Body(...), user=Depends(current_user)):
+    question = (body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(400, "Нужен question")
+    return kb.answer(question)
+
+
+# ---------- MVP2: NFR-валидация (BR-51…53) ----------
+
+@router.post("/services/{sid}/nfr/extract")
+def nfr_extract(sid: int, user=Depends(current_user)):
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    ex = nfr.extract_targets(sid)
+    saved = nfr.apply_targets(sid, user, ex["extracted"]) if ex["extracted"] else []
+    return {**ex, "saved": saved}
+
+
+@router.patch("/nfr/{mid}")
+def nfr_update(mid: int, body=Body(...), user=Depends(current_user)):
+    m = q1("SELECT * FROM nfr_metrics WHERE id=?", (mid,))
+    if not m:
+        raise HTTPException(404, "Метрика не найдена")
+    svc = q1("SELECT * FROM services WHERE id=?", (m["service_id"],))
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    for f in ("target_value", "actual_value", "target_note", "source"):
+        if f in body:
+            exec(f"UPDATE nfr_metrics SET {f}=? WHERE id=?", (body[f], mid))
+    if "actual_value" in body:
+        exec("UPDATE nfr_metrics SET measured_at=? WHERE id=?", (now(), mid))
+    audit(user, "nfr_update", f"service:{svc['code']}", f"{m['metric']}: {', '.join(body.keys())}")
+    return nfr.validate(m["service_id"])
+
+
+# ---------- MVP2: синхронизация с Confluence (BR-54…56) ----------
+
+@router.post("/integrations/confluence/export")
+def confluence_export(body=Body(default={}), user=Depends(current_user)):
+    r = integrations.export_debts_xhtml(body.get("service_id"))
+    audit(user, "confluence_export", f"page:{integrations.DEBT_PAGE_ID}",
+          f"records:{r['records']}")
+    return r
+
+
+@router.post("/integrations/confluence/import")
+def confluence_import(body=Body(...), user=Depends(current_user)):
+    if user["role"] not in ("admin", "domain_expert"):
+        raise HTTPException(403, "Импорт реестра: domain_expert, admin")
+    parsed = integrations.parse_debts_markdown(body.get("markdown") or "")
+    if not parsed:
+        raise HTTPException(400, "В тексте не найдено записей реестра (markdown-таблица с колонкой ID)")
+    r = integrations.import_debts(parsed, user)
+    audit(user, "confluence_import", f"page:{integrations.DEBT_PAGE_ID}",
+          f"created:{len(r['created'])} updated:{len(r['updated'])}")
+    return r

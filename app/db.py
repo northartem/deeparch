@@ -145,6 +145,40 @@ CREATE TABLE IF NOT EXISTS tech_debts (
   updated_at REAL
 );
 
+CREATE TABLE IF NOT EXISTS fitness_rules (   -- MVP2 BR-41: правила-фитнес-функции
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  artifact_kind TEXT,                    -- к какому артефакту применяется
+  check_kind TEXT NOT NULL,              -- diagram_source / contains / regex / minlen
+  params TEXT NOT NULL DEFAULT '{}',     -- JSON: {"value":...,"path":...} 
+  severity TEXT NOT NULL DEFAULT 'blocker',  -- blocker / warning
+  standard_ref TEXT,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS fitness_runs (    -- MVP2 BR-42: прогоны автопроверки
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  service_id INTEGER NOT NULL REFERENCES services(id),
+  results TEXT NOT NULL,                 -- JSON: [{rule_id,name,verdict,detail}]
+  passed INTEGER, failed INTEGER, warned INTEGER,
+  created_by TEXT, created_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS nfr_metrics (     -- MVP2 BR-51…53: цели vs факты
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  service_id INTEGER NOT NULL REFERENCES services(id),
+  metric TEXT NOT NULL,                  -- rps / p95_ms / sla_pct / rto_h / rpo_min
+  target_value REAL,
+  target_note TEXT DEFAULT '',
+  actual_value REAL,
+  measured_at REAL,
+  source TEXT DEFAULT '',
+  created_by TEXT, created_at REAL,
+  UNIQUE(service_id, metric)
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL, user TEXT, action TEXT, entity TEXT, detail TEXT

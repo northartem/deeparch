@@ -111,6 +111,45 @@ def _seed_workflow():
              " VALUES(?,?,?,?,?,?,?)",
              (svc["id"], req, requested_at, reviewer, status, comment, decided_at))
         exec("UPDATE services SET review_status=?, updated_at=? WHERE id=?", (status, now(), svc["id"]))
+    # MVP2 BR-41: дефолтные fitness-правила (источник — общий стандарт, pageId=894079737)
+    import json as _json
+    for name, kind, check, params, sev, ref in [
+        ("C4: исходник диаграммы хранится в артефакте", "vision_c4", "diagram_source", {},
+         "blocker", "pageId=894079737 «В сухом остатке»"),
+        ("API: описаны минимум 3 эндпоинта MVP-сценария", "api", "regex",
+         {"value": r"###\s+(GET|POST|PUT|PATCH|DELETE)", "count": 3}, "blocker", "pageId=894079737 §5"),
+        ("NFR: цели зафиксированы цифрами (RPS/p95/SLA)", "nfr_security", "regex",
+         {"value": r"(rps|p95|sla)", "count": 3}, "blocker", "pageId=894079737 §6"),
+        ("ADR: каталог 001–005 с обоснованием", "adr", "regex",
+         {"value": r"ADR-00[1-5]", "count": 5}, "warning", "pageId=894079737 §2"),
+        ("Config: окружение поднимается одной командой", "config_build", "contains",
+         {"value": ["docker compose"], "path": "docker-compose.yml"}, "warning", "pageId=894079737 §7"),
+        ("Deployment: окружения Dev/Test/Prod описаны", "deployment", "contains",
+         {"value": ["Test", "Prod"], "path": "deployment/docker-compose.yml"}, "warning", "pageId=894079737 §3"),
+    ]:
+        exec("INSERT INTO fitness_rules(name,description,artifact_kind,check_kind,params,"
+             "severity,standard_ref,active,created_at) VALUES(?,?,?,?,?,?,?,1,?)",
+             (name, "", kind, check, _json.dumps(params, ensure_ascii=False), sev, ref, now()))
+
+    # MVP2 BR-51: демо-метрики «цель vs факт»
+    demo_nfr = {
+        "MPR": [("rps", 500, 470, "нагрузочный стенд PAT-3"), ("p95_ms", 300, 412, "Prometheus, prod"),
+                ("sla_pct", 99.95, 99.97, "отчёт SRE за октябрь")],
+        "PCG": [("rps", 50, 55, "нагрузочный стенд")],
+        "UMBB": [("rps", 2000, None, "цель из Vision, стенд не проводился"),
+                 ("p95_ms", 200, None, "цель из Vision, стенд не проводился")],
+    }
+    for code, metrics in demo_nfr.items():
+        svc = q1("SELECT id FROM services WHERE code=?", (code,))
+        if not svc:
+            continue
+        for metric, target, actual, note in metrics:
+            exec("INSERT OR IGNORE INTO nfr_metrics(service_id,metric,target_value,"
+                 "target_note,actual_value,measured_at,source,created_by,created_at)"
+                 " VALUES(?,?,?,?,?,?,?,?,?)",
+                 (svc["id"], metric, target, note, actual,
+                  now() - 172800 if actual is not None else None,
+                  note if actual is not None else "", "expert", now()))
     # реестр техдолга: ID генерируется по правилу стандарта (счётчики AD/TD отдельно,
     # обнуляются ежемесячно) — вставка в хронологическом порядке регистрации
     from .debts import gen_debt_id

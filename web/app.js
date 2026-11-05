@@ -30,7 +30,7 @@ const route = (re, fn) => routes.push([re, fn]);
 async function render(){
   if(!S.user){ return viewLogin(); }
   const h = location.hash || '#/';
-  const nav = {'#/':'Дашборд','#/services':'Сервисы','#/debts':'Техдолг','#/components':'Компоненты','#/access':'Доступ','#/admin':'Интеграции'};
+  const nav = {'#/':'Дашборд','#/services':'Сервисы','#/assistant':'Ассистент','#/debts':'Техдолг','#/components':'Компоненты','#/access':'Доступ','#/admin':'Интеграции'};
   $('#nav').innerHTML = Object.entries(nav).map(([u,t]) =>
     `<a href="${u}" class="${h.startsWith(u)&&u!=='#/'||h===u?'act':''}">${t}</a>`).join('');
   $('#userbox').innerHTML = `${esc(S.user.display_name)} · ${S.user.role} <button class="sec" onclick="logout()">Выйти</button>`;
@@ -75,6 +75,7 @@ route(/^#\/services$/, viewServices);
 route(/^#\/service\/(\d+)(?:\/(\w+))?$/, (id, tab) => viewService(+id, tab));
 route(/^#\/components$/, viewComponents);
 route(/^#\/debts$/, viewDebts);
+route(/^#\/assistant$/, viewAssistant);
 route(/^#\/access$/, async () => { SVC_CACHE = await api('/services'); return viewAccess(); });
 
 async function viewDash(){
@@ -118,20 +119,31 @@ async function viewServices(){
 }
 function formService(){
   const opts = Object.entries(S.standard.project_types).map(([k,v])=>`<option value="${k}">${esc(v.title)}</option>`).join('');
-  openModal(`Новый сервис`, `<label>Код (напр. MPR)</label><input id="f-code">
-    <label>Название</label><input id="f-name">
-    <label>Тип проекта</label><select id="f-pt">${opts}</select>
-    <div class="grid g2"><div><label>Домен</label><input id="f-domain"></div>
-    <div><label>Владелец</label><input id="f-owner"></div></div>
-    <div class="btnrow"><button onclick="createService()">Создать</button></div>`);
+  openModal('Service Factory — новый сервис (BR-45…47)', `
+    <p class="small mut">Генерирует стартовый архитектурный пакет: 7 артефактов по шаблонам стандарта,
+    пустой self-check и подключение всех approved-компонентов каталога (compliance by construction).</p>
+    <div class="grid g2"><div><label>Код (напр. MPR)</label><input id="f-code"></div>
+    <div><label>Название</label><input id="f-name"></div></div>
+    <div class="grid g2"><div><label>Тип проекта</label><select id="f-pt">${opts}</select></div>
+    <div><label>Домен</label><input id="f-domain"></div></div>
+    <div class="grid g2"><div><label>Владелец</label><input id="f-owner" value="${esc(S.user.username)}"></div>
+    <div><label>Архитектор</label><input id="f-arch" value="${esc(S.user.username)}"></div></div>
+    <div class="btnrow"><button onclick="createService()">Сгенерировать пакет</button></div>`);
 }
 async function createService(){
   try{
-    const r = await api('/services', {method:'POST', body: JSON.stringify({
+    const r = await api('/factory/scaffold', {method:'POST', body: JSON.stringify({
       code:$('#f-code').value, name:$('#f-name').value, project_type:$('#f-pt').value,
-      domain:$('#f-domain').value, owner:$('#f-owner').value})});
-    closeModal(); toast(`Сервис ${r.code} создан — 7 артефактов заведены по стандарту`);
-    location.hash = `#/service/${r.id}`;
+      domain:$('#f-domain').value, owner:$('#f-owner').value, architect:$('#f-arch').value})});
+    closeModal();
+    openModal(`Сервис ${esc(r.code)} создан`, `
+      <p class="small mut">Сгенерировано: ${r.artifacts} артефактов по шаблонам стандарта ·
+      подключено компонентов: ${r.components_attached.length}
+      (${esc(r.components_attached.join(', ')||'—')}).</p>
+      <h2 style="margin:10px 0 4px">Next steps</h2>
+      <ol class="small">${r.next_steps.map(s=>`<li style="margin:4px 0">${esc(s)}</li>`).join('')}</ol>
+      <div class="btnrow"><button onclick="closeModal();location.hash='#/service/${r.id}'">Открыть сервис</button></div>`);
+    toast(`Пакет для ${esc(r.code)} сгенерирован Service Factory`);
   }catch(e){ toast(esc(e.message), true); }
 }
 
@@ -141,7 +153,8 @@ let SERVICE = null;
 async function viewService(id, tab='card'){
   const s = await api('/services/'+id); SERVICE = s;
   const active = tab||'card';
-  const tabs = [...TABS, ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')]];
+  const tabs = [...TABS, ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')],
+    ['fitness', 'Fitness'], ['nfr', 'NFR']];
   $('#view').innerHTML = `
   <p class="small"><a class="lnk" href="#/services">← Реестр сервисов</a></p>
   <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">
@@ -155,7 +168,7 @@ async function viewService(id, tab='card'){
   <div class="tabs">${tabs.map(([k,t])=>`<a class="${k===active?'act':''}" href="#/service/${id}/${k}">${t}</a>`).join('')}</div>
   <div id="tabbody"></div>`;
   ({card:tabCard, artifacts:tabArtifacts, diagrams:tabDiagrams, check:tabCheck, review:tabReview,
-    components:tabComponents, debt:tabDebt}[active])(s);
+    components:tabComponents, debt:tabDebt, fitness:tabFitness, nfr:tabNfr}[active])(s);
 }
 
 /* ---------- диаграммы (Mermaid) ---------- */
@@ -527,6 +540,126 @@ async function debtStatus(id){
   }catch(e){ toast(esc(e.message), true); }
 }
 
+/* ---------- MVP2: fitness functions (BR-41…44) ---------- */
+const VERDICT_BADGE = {pass:'b-approved', fail:'b-changes_requested', warn:'b-in_review', unknown:'b-draft', breach:'b-changes_requested', ok:'b-approved', partial:'b-in_review'};
+function tabFitness(s){
+  const last = s.fitness_last;
+  $('#tabbody').innerHTML = `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin-top:0">Fitness functions — автопроверка правил архитектуры (BR-41…42)</h2>
+      <button onclick="runFitness(${s.id})">▶ Прогнать проверки</button></div>
+    <p class="small mut">Правила — проверяемые утверждения стандарта (pageId=894079737): исходники диаграмм,
+    3+ эндпоинта API, NFR в цифрах, ADR-001…005, docker compose. blocker проваливает прогон, warning — нет.</p>
+    ${last?`<div class="btnrow" style="margin:10px 0">
+      <span class="badge ${VERDICT_BADGE.pass}">✔ ${last.passed}</span>
+      <span class="badge ${VERDICT_BADGE.fail}">✖ ${last.failed}</span>
+      <span class="badge ${VERDICT_BADGE.warn}">⚠ ${last.warned}</span>
+      <span class="small mut">последний прогон: ${new Date(last.created_at*1000).toLocaleString('ru')} · ${esc(last.created_by)}</span></div>`
+      :'<p class="mut">Прогонов ещё не было.</p>'}
+    <div id="fit-res"></div>
+    <div class="btnrow" style="margin-top:14px"><button class="sec" onclick="showCi(${s.id})">⬇ CI-пак (gitlab-ci + python)</button></div>
+    <p class="small mut">BR-43/44: тот же набор правил экспортируется в CI — проверка в репозитории до ревью.</p>
+  </div>`;
+}
+async function runFitness(sid){
+  try{
+    const r = await api(`/services/${sid}/fitness`, {method:'POST'});
+    toast(`Прогон: ✔ ${r.passed} · ✖ ${r.failed} · ⚠ ${r.warned}`);
+    render();
+  }catch(e){ toast(esc(e.message), true); }
+}
+async function showCi(sid){
+  try{
+    const r = await fetch(`/api/services/${sid}/fitness/ci.txt`, {headers:{'X-Token':localStorage.token}});
+    const text = await r.text();
+    openModal('CI-пак fitness-проверок', `
+      <p class="small mut">1) <code>fitness_check.py</code> — в репозиторий сервиса; 2) job — в <code>.gitlab-ci.yml</code>.
+      Правила синхронизированы с DeepArch: изменение стандарта подтягивается перегенерацией.</p>
+      <pre class="sm" style="max-height:46vh;overflow:auto;background:var(--bg2,#f5f6fa);padding:10px;border-radius:8px;white-space:pre-wrap">${esc(text)}</pre>
+      <div class="btnrow"><button onclick="downloadCi(${sid})">Скачать файлом</button></div>`);
+  }catch(e){ toast(esc(e.message), true); }
+}
+async function downloadCi(sid){
+  const r = await fetch(`/api/services/${sid}/fitness/ci.txt`, {headers:{'X-Token':localStorage.token}});
+  const blob = new Blob([await r.text()], {type:'text/plain'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = `fitness_${SERVICE.code.toLowerCase()}.txt`; a.click();
+}
+
+/* ---------- MVP2: NFR-валидация (BR-51…53) ---------- */
+const METRIC_RU = {rps:'RPS (пиковый)', p95_ms:'Время ответа p95, ms', sla_pct:'SLA, %',
+                   rto_h:'RTO, ч', rpo_min:'RPO, мин'};
+function tabNfr(s){
+  const nfr = s.nfr || {metrics:[]};
+  $('#tabbody').innerHTML = `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin-top:0">NFR-валидация: цель vs факт (BR-51…53)</h2>
+      <button onclick="nfrExtract(${s.id})">⇣ Извлечь цели из артефакта NFR</button></div>
+    <p class="small mut">Цели (RPS, p95, SLA, RTO, RPO) извлекаются из артефакта «NFR &amp; Security»;
+    факт вносится по данным нагрузочного стенда / мониторинга. breach — факт хуже цели.</p>
+    <div class="btnrow" style="margin:10px 0">
+      <span class="badge ${VERDICT_BADGE[nfr.verdict]||'b-draft'}">вердикт: ${esc(nfr.verdict||'—')}</span>
+      ${nfr.breaches?`<span class="badge ${VERDICT_BADGE.breach}">breach: ${nfr.breaches}</span>`:''}
+      ${nfr.unknown?`<span class="badge b-draft">не измерено: ${nfr.unknown}</span>`:''}</div>
+    ${nfr.metrics.length?`<table><tr><th>Метрика</th><th>Цель</th><th>Факт</th><th>Статус</th><th>Источник</th><th></th></tr>
+      ${nfr.metrics.map(m=>`<tr>
+        <td><b>${METRIC_RU[m.metric]||esc(m.metric)}</b></td>
+        <td>${m.target_value!=null?`<code>${m.target_value}</code>`:'—'}${m.target_note?`<div class="small mut">${esc(m.target_note)}</div>`:''}</td>
+        <td><input id="nfr-act-${m.id}" type="number" step="any" value="${m.actual_value??''}" style="width:110px" placeholder="факт"></td>
+        <td><span class="badge ${VERDICT_BADGE[m.status]||'b-draft'}">${m.status}</span><div class="small mut">${esc(m.detail||'')}</div></td>
+        <td class="small mut">${esc(m.source||'—')}</td>
+        <td><button class="sec" onclick="nfrSave(${m.id})">Сохранить</button></td></tr>`).join('')}</table>`
+      :'<p class="mut">Метрик нет — извлеките цели из артефакта NFR или заполните артефакт цифрами.</p>'}
+  </div>`;
+}
+async function nfrExtract(sid){
+  try{
+    const r = await api(`/services/${sid}/nfr/extract`, {method:'POST'});
+    toast(r.saved.length?`Извлечены и сохранены цели: ${r.saved.map(m=>METRIC_RU[m]||m).join(', ')}`
+         :'Цифры в артефакте NFR не найдены — заполните RPS/p95/SLA/RTO/RPO');
+    render();
+  }catch(e){ toast(esc(e.message), true); }
+}
+async function nfrSave(mid){
+  try{
+    const v = $(`#nfr-act-${mid}`).value;
+    const r = await api(`/nfr/${mid}`, {method:'PATCH', body: JSON.stringify({actual_value:v===''?null:+v})});
+    toast(`Факт сохранён · вердикт сервиса: ${r.verdict}`); render();
+  }catch(e){ toast(esc(e.message), true); }
+}
+
+/* ---------- MVP2: RAG-ассистент по стандарту (BR-48…50) ---------- */
+async function viewAssistant(){
+  $('#view').innerHTML = `<h1>Ассистент по стандарту</h1>
+  <p class="mut">База знаний — реальные страницы Confluence dats.tech (Architecture Definition Set, self-check,
+  навигатор, регламенты техдолга). Ответы извлекающие, с цитатами; advisory-режим — ничего не меняет.
+  Контракт готов к подключению корпоративного AI-Buddy.</p>
+  <div class="card" style="margin-top:14px">
+    <div style="display:flex;gap:8px"><input id="q" style="flex:1" placeholder="Например: какие ADR обязательны для старта? что считается техдолгом?"
+      onkeydown="if(event.key==='Enter')askAssistant()">
+      <button onclick="askAssistant()">Спросить</button></div>
+    <div id="a-out" style="margin-top:14px"></div>
+  </div>`;
+  const suggestions = ['Какие документы обязательны для проекта?', 'Как генерируется ID техдолга?',
+                       'Что не является техническим долгом?', 'Когда идти к эксперту домена?'];
+  $('#a-out').innerHTML = `<p class="small mut">Попробуйте: ${suggestions.map(s=>`<a class="lnk" href="javascript:void askQ(${JSON.stringify(s).replace(/"/g,'&quot;')})">${esc(s)}</a>`).join(' · ')}</p>`;
+}
+function askQ(q){ $('#q').value = q; askAssistant(); }
+async function askAssistant(){
+  const question = $('#q').value.trim();
+  if(!question) return;
+  $('#a-out').innerHTML = '<p class="mut">Ищу в базе знаний…</p>';
+  try{
+    const r = await api('/assistant', {method:'POST', body: JSON.stringify({question})});
+    $('#a-out').innerHTML = `
+      <div style="white-space:pre-wrap;line-height:1.55">${esc(r.answer)}</div>
+      <p class="small mut" style="margin-top:10px">уверенность: ${Math.round(r.confidence*100)}%</p>
+      ${r.citations.length?`<div class="btnrow">${r.citations.map(c=>
+        `<span class="chip">📄 <a class="lnk" href="${esc(c.url)}" target="_blank">${esc(c.title)}</a>
+         <span class="small mut">pageId=${c.page_id}</span></span>`).join('')}</div>`:''}`;
+  }catch(e){ toast(esc(e.message), true); $('#a-out').innerHTML = ''; }
+}
+
 /* ---------- ролевая модель (Доступ) ---------- */
 const KIND_BADGE = {domain:'b-desired', committee:'b-mandatory', product:'b-in_review', security:'b-changes_requested'};
 const KIND_TITLE = {domain:'домен', committee:'комитет', product:'продукт', security:'security'};
@@ -612,6 +745,16 @@ async function viewAdmin(){
       <p class="small mut">Все AI-сценарии через корпоративную LLM-платформу. MVP работает на mock-провайдере
       (детерминированные эвристики) — контракт API уже финальный.</p>
       <span class="badge b-Ch">mock → production</span></div>
+    <div class="card"><h2 style="margin-top:0">Confluence: реестр техдолга (BR-54…56)</h2>
+      <p class="small mut">Двусторонняя синхронизация со страницей «Реестр технического долга»
+      (pageId=915912594): экспорт XHTML (storage format) и импорт markdown-таблицы.
+      ID долга сохраняется как есть — неизменяем по правилу (pageId=918365931).</p>
+      <div class="btnrow"><button class="cya" onclick="cfExport()" ${can?'':'disabled'}>Сформировать XHTML</button></div>
+      <div id="cf-exp" style="margin-top:10px"></div>
+      <label style="margin-top:12px">Импорт из markdown-таблицы страницы</label>
+      <textarea class="sm" id="cf-md" rows="5" placeholder="| ID | Тип долга | Название | Система / домен | ... |"></textarea>
+      <div class="btnrow"><button class="sec" onclick="cfImport()" ${['domain_expert','admin'].includes(S.user.role)?'':'disabled'}>Импортировать долги</button></div>
+    </div>
     <div class="card"><h2 style="margin-top:0">Журнал аудита</h2>
       <p class="small mut">Все действия фиксируются (BR-33). Просмотр: expert/admin.</p>
       <div class="btnrow">${can?'<button class="sec" onclick="showAudit()">Открыть журнал</button>':'<span class="mut small">нужна роль domain_expert+</span>'}</div>
@@ -633,6 +776,24 @@ async function showAudit(){
     const rows = await api('/audit');
     $('#audit-res').innerHTML = `<table style="margin-top:10px"><tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Объект</th></tr>
     ${rows.slice(0,12).map(a=>`<tr><td class="small mut">${new Date(a.ts*1000).toLocaleString('ru')}</td><td>${esc(a.user)}</td><td class="small">${esc(a.action)}</td><td class="small mut">${esc(a.entity)}</td></tr>`).join('')}</table>`;
+  }catch(e){ toast(esc(e.message), true); }
+}
+async function cfExport(){
+  try{
+    const r = await api('/integrations/confluence/export', {method:'POST', body: '{}'});
+    $('#cf-exp').innerHTML = `<p class="small mut">Записей: ${r.records} · целевая страница: pageId=${r.page_id}</p>
+      <pre class="sm" style="max-height:24vh;overflow:auto;background:var(--bg2,#f5f6fa);padding:10px;border-radius:8px;white-space:pre-wrap">${esc(r.xhtml.slice(0,1500))}${r.xhtml.length>1500?'…':''}</pre>`;
+    window._CF_XHTML = r.xhtml;
+    toast(`XHTML сформирован: ${r.records} записей`);
+  }catch(e){ toast(esc(e.message), true); }
+}
+async function cfImport(){
+  try{
+    const md = $('#cf-md').value.trim();
+    if(!md) return toast('Вставьте markdown-таблицу реестра', true);
+    const r = await api('/integrations/confluence/import', {method:'POST', body: JSON.stringify({markdown: md})});
+    toast(`Импорт: создано ${r.created.length} · обновлено ${r.updated.length}`);
+    $('#cf-md').value = '';
   }catch(e){ toast(esc(e.message), true); }
 }
 

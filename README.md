@@ -44,6 +44,16 @@ uv run uvicorn app.main:app --port 8731
 Данные стандарта захардкожены из реальных страниц Confluence: `app/standards.py`
 (7 артефактов, чек-лист self-check, матрица 6 типов проектов).
 
+## Что реализовано (MVP2)
+
+| Модуль | BR | Что делает |
+| --- | --- | --- |
+| Fitness functions | BR-41…44 | правила-фитнес-функции над артефактами (исходники диаграмм, 3+ эндпоинта API, NFR в цифрах, ADR-001…005, docker compose); прогон с вердиктом pass/fail/warn; экспорт CI-пака (gitlab-ci + автономный python-скрипт) для проверки в репозитории |
+| Service Factory | BR-45…47 | скаффолдинг: сервис + 7 артефактов по шаблонам стандарта + пустой self-check + подключение approved-компонентов + отчёт next_steps по матрице типа проекта |
+| RAG-ассистент | BR-48…50 | база знаний из реальных страниц стандарта (TF-IDF ретрив + извлекающий ответ с цитатами pageId/url); advisory-режим; контракт готов к AI-Buddy |
+| NFR-валидация | BR-51…53 | извлечение целей (RPS, p95, SLA, RTO, RPO) из артефакта NFR regex'ами; факт по метрикам; статус ok / breach / unknown с вердиктом по сервису |
+| Синхронизация с Confluence | BR-54…56 | экспорт реестра долга в XHTML (storage format, pageId=915912594); импорт markdown-таблицы с сохранением ID (ID неизменяем — pageId=918365931) |
+
 ## Структура
 
 ```
@@ -53,7 +63,11 @@ app/
   db.py            # SQLite (WAL)
   standards.py     # данные Architecture Definition Set
   ai.py            # AI-адаптер (mock → AI-Buddy)
-  integrations.py  # адаптер каталога/CMDB (mock Backstage → DataGerry)
+  integrations.py  # адаптер каталога/CMDB + синхронизация с Confluence
+  fitness.py       # fitness-функции + генерация CI-пака
+  factory.py       # Service Factory (скаффолдинг)
+  kb.py/kb_data.py # RAG-ассистент: ретрив + база знаний (реальные страницы)
+  nfr.py           # NFR-валидация: извлечение целей, цель vs факт
   auth.py          # токены + RBAC
   seed.py          # демо-данные
 web/               # SPA: index.html, app.js, styles.css
@@ -74,14 +88,24 @@ POST /api/services/{id}/components       → подключить компоне
 POST /api/ai/draft | /api/ai/precheck    → AI-черновик / AI Gate (advisory)
 POST /api/integrations/backstage/import  → импорт из каталога (dry-run)
 GET  /api/integrations/services/{id}/catalog-export → catalog-info.yaml
+GET/POST /api/debts … /api/debts/{id}/status → реестр техдолга (BR-38…40)
+GET  /api/fitness/rules                  → активные fitness-правила
+POST /api/services/{id}/fitness          → прогон fitness-проверок
+GET  /api/services/{id}/fitness/ci.txt   → CI-пак (gitlab-ci + python)
+POST /api/factory/scaffold               → Service Factory (BR-45…47)
+POST /api/assistant                      → RAG-ассистент с цитатами (BR-48…50)
+POST /api/services/{id}/nfr/extract      → извлечь NFR-цели из артефакта
+PATCH /api/nfr/{mid}                     → факт по метрике + вердикт
+POST /api/integrations/confluence/export|import → XHTML экспорт / markdown импорт долга
 GET  /api/dashboard | /api/audit
 ```
 
 ## Дорожная карта (следующие шаги)
 
-1. **AI-Buddy вместо mock** — реализовать провайдера за тем же контрактом API.
-2. **Backstage-коннектор** — реальный `catalog-info.yaml` из GitLab вместо mock.
-3. **DataGerry-коннектор** — ObjectTypes + матрица доступов (контур ИБ).
-4. Impact analysis по графу зависимостей CMDB (BR-24), контекст ревью из CMDB (BR-25).
-5. Диаграммы: редактор C4 (Mermaid/Structurizr DSL) с хранением исходников.
-6. Переход с токенов на SSO/LDAP компании.
+1. **AI-Buddy вместо mock** — реализовать провайдера за тем же контрактом API (включая RAG-ассистента).
+2. **Real Confluence API** — прямая запись XHTML на страницу реестра долга (сейчас — копипаста через UI).
+3. **Backstage-коннектор** — реальный `catalog-info.yaml` из GitLab вместо mock.
+4. **DataGerry-коннектор** — ObjectTypes + матрица доступов (контур ИБ).
+5. Impact analysis по графу зависимостей CMDB (BR-24), контекст ревью из CMDB (BR-25).
+6. Диаграммы: редактор C4 (Mermaid/Structurizr DSL) с хранением исходников.
+7. Переход с токенов на SSO/LDAP компании.
