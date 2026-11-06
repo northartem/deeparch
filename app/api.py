@@ -13,6 +13,7 @@ from .standards import (STANDARD_NAME, STANDARD_REF, ARTIFACT_KINDS, CHECKLIST_I
                         DEBT_TYPES, DEBT_STATUSES, DEBT_RISKS, DEBT_PRIORITIES)
 from .debts import gen_debt_id
 from . import ai, integrations, fitness, factory, nfr, kb, llm, reqs
+from . import c4 as c4mod
 from .seed import seed, demo_vision_template
 
 router = APIRouter(prefix="/api")
@@ -442,6 +443,62 @@ def nfr_from_requirements(sid: int, user=Depends(current_user)):
     if not r:
         raise HTTPException(400, "НФТ-требований нет — добавьте их в разделе «Требования»")
     audit(user, "nfr_from_requirements", f"service:{sid}", f"provider:{r['provider']}")
+    return r
+
+
+# ---------- Проектирование: визуальные C4-модели (L1/L2) ----------
+
+@router.get("/services/{sid}/c4")
+def c4_get(sid: int, user=Depends(current_user)):
+    svc = q1("SELECT id FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    return {"models": c4mod.load(sid)}
+
+
+@router.put("/services/{sid}/c4/{view}")
+def c4_put(sid: int, view: str, body=Body(...), user=Depends(current_user)):
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    try:
+        norm = c4mod.save(sid, view, body.get("model") or {}, user["username"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    audit(user, "c4_save", f"service:{sid}/{view}",
+          f"nodes:{len(norm['nodes'])} edges:{len(norm['edges'])}")
+    return {"ok": True, "model": norm}
+
+
+@router.post("/services/{sid}/c4/{view}/ai")
+def c4_ai(sid: int, view: str, body=Body(None), user=Depends(current_user)):
+    """Сценарий 2: AI-структура C4-модели из фактов сервиса и требований (advisory)."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    r = c4mod.ai_design(sid, view, model=((body or {}).get("model") or "").strip())
+    audit(user, "c4_ai", f"service:{sid}/{view}", f"provider:{r['provider']}")
+    return r
+
+
+@router.post("/services/{sid}/c4/export")
+def c4_export(sid: int, body=Body(None), user=Depends(current_user)):
+    """Экспорт обеих C4-моделей в Mermaid-исходник артефакта vision_c4."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    if body and body.get("dry_run"):
+        return {"ok": True, "code": c4mod.build_code(sid)}
+    r = c4mod.export_to_artifact(sid, user["username"])
+    if not r.get("ok"):
+        raise HTTPException(404, r.get("note", "не найдено"))
+    audit(user, "c4_export", f"service:{sid}", f"updated:{r.get('updated')} len:{r.get('code_len', 0)}")
     return r
 
 

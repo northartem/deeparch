@@ -93,6 +93,9 @@ POST /api/services/{sid}/requirements/parse → AI-разбор вставлен
 POST /api/services/{sid}/requirements/import → импорт разобранного (номера ФТ-N/НФТ-N)
 PATCH/DELETE /api/requirements/{id}         → правка/удаление требования
 POST /api/services/{sid}/nfr/from-requirements → черновик NFR profile из НФТ
+GET/PUT /api/services/{sid}/c4[/{view}]     → визуальные C4-модели (context L1 / container L2)
+POST /api/services/{sid}/c4/{view}/ai       → AI-структура C4-модели (advisory)
+POST /api/services/{sid}/c4/export          → экспорт моделей в Mermaid-исходник Vision (dry_run — предпросмотр)
 POST /api/integrations/backstage/import  → импорт из каталога (dry-run)
 GET  /api/integrations/services/{id}/catalog-export → catalog-info.yaml
 GET/POST /api/debts … /api/debts/{id}/status → реестр техдолга (BR-38…40)

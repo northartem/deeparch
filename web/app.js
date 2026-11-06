@@ -148,14 +148,15 @@ async function createService(){
 }
 
 /* ---------- service detail ---------- */
-const TABS = [['card','Карточка'],['artifacts','Артефакты (7)'],['diagrams','Диаграммы'],['check','Self-check'],['review','Ревью'],['components','Компоненты']];
+const TABS = [['card','Карточка'],['artifacts','Артефакты (7)'],['diagrams','Диаграммы'],['check','Self-check'],['review','Ревью'],['components','Компоненты']]; // базовый список (полный собирается в viewService)
 let SERVICE = null;
 async function viewService(id, tab='card'){
   const s = await api('/services/'+id); SERVICE = s;
   const active = tab||'card';
-  const tabs = [...TABS.slice(0, 1),
+  const tabs = [['card','Карточка'],
     ['reqs', 'Требования' + (s.requirements?.length ? ` (${s.requirements.length})` : '')],
-    ...TABS.slice(1),
+    ['design', 'Проектирование'],
+    ['artifacts','Артефакты (7)'],['diagrams','Диаграммы'],['check','Self-check'],['review','Ревью'],['components','Компоненты'],
     ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')],
     ['fitness', 'Fitness'], ['nfr', 'NFR']];
   $('#view').innerHTML = `
@@ -170,7 +171,7 @@ async function viewService(id, tab='card'){
   </div>
   <div class="tabs">${tabs.map(([k,t])=>`<a class="${k===active?'act':''}" href="#/service/${id}/${k}">${t}</a>`).join('')}</div>
   <div id="tabbody"></div>`;
-  ({card:tabCard, reqs:tabReqs, artifacts:tabArtifacts, diagrams:tabDiagrams, check:tabCheck, review:tabReview,
+  ({card:tabCard, reqs:tabReqs, design:tabDesign, artifacts:tabArtifacts, diagrams:tabDiagrams, check:tabCheck, review:tabReview,
     components:tabComponents, debt:tabDebt, fitness:tabFitness, nfr:tabNfr}[active])(s);
 }
 
@@ -843,6 +844,305 @@ async function reqNfrDraft(sid, btn){
     if(el) el.value = r.content_md;
     toast(`NFR profile из НФТ (${r.provider === 'ai-buddy' ? esc(r.model||'AI-Buddy') : 'перенос без LLM'}) вставлен в артефакт — <b>требует подтверждения автора</b>`);
   }catch(e){ toast(esc(e.message), true); btn.disabled = false; btn.textContent = '⇥ Сгенерировать NFR profile из НФТ'; }
+}
+
+/* ---------- Проектирование: визуальный C4-редактор (L1/L2) ---------- */
+const C4_TYPES = [
+  {t:'person',    ru:'Персона',          icon:'👤', fill:'#eef2ff', line:'#6366f1', dash:''},
+  {t:'system',    ru:'Наша система',     icon:'🖥️', fill:'#ecfdf5', line:'#10b981', dash:''},
+  {t:'external',  ru:'Внешняя система',  icon:'☁️', fill:'#fff7ed', line:'#f59e0b', dash:'6 3'},
+  {t:'container', ru:'Контейнер',        icon:'📦', fill:'#f0f9ff', line:'#0ea5e9', dash:''},
+  {t:'db',        ru:'База данных',      icon:'🗄️', fill:'#fdf4ff', line:'#c026d3', dash:''}
+];
+const C4_TYPE = Object.fromEntries(C4_TYPES.map(x => [x.t, x]));
+const C4_W = 160, C4_H = 64;
+const C4_VIEWS = {context: 'Контекст (L1)', container: 'Контейнеры (L2)'};
+let DSGN = {sid: null, models: {}, view: 'context', sel: null, selType: null, linkFrom: null, saveT: null};
+
+const c4M = () => DSGN.models[DSGN.view];
+const c4Node = id => c4M() && (c4M().nodes || []).find(n => n.id === id);
+const c4Edge = id => c4M() && (c4M().edges || []).find(e => e.id === id);
+
+async function tabDesign(s){
+  DSGN.sid = s.id; DSGN.sel = null; DSGN.selType = null; DSGN.linkFrom = null;
+  const r = await api(`/services/${s.id}/c4`).catch(() => ({models: {}}));
+  DSGN.models = r.models || {};
+  for(const v of Object.keys(C4_VIEWS))
+    if(!DSGN.models[v]) DSGN.models[v] = {nodes: [], edges: []};
+  DSGN.view = DSGN.models.context.nodes.length ? 'context'
+            : DSGN.models.container.nodes.length ? 'container' : 'context';
+  $('#tabbody').innerHTML = `
+  <div class="card" style="margin-bottom:14px">
+    <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">
+      <div><b>Проектирование архитектуры — C4</b>
+        <div class="small mut">Сценарий 1 — рисуйте вручную палитрой слева. Сценарий 2 —
+        «AI-структура» спроектирует модель из требований и фактов сервиса, затем правьте её же редактором.
+        Модель хранится как JSON; «Экспорт в Mermaid» кладёт C4-исходник в артефакт Vision для self-check.</div></div>
+      <div class="btnrow">
+        <button onclick="c4AI('${DSGN.view}', this)">🧠 AI-структура</button>
+        <button class="sec" onclick="c4Preview(this)">👁 Mermaid-предпросмотр</button>
+        <button class="cya" onclick="c4Export(this)">⇥ Экспорт в артефакт Vision</button>
+      </div>
+    </div>
+  </div>
+  <div class="design-shell">
+    <div class="c4-side">
+      <b class="small">ПАЛИТРА ЭЛЕМЕНТОВ</b>
+      <div class="c4-palette">
+        ${C4_TYPES.map(x => `<button onclick="c4Add('${x.t}')" title="Добавить: ${x.ru}">${x.icon} ${x.ru}</button>`).join('')}
+      </div>
+      <div class="btnrow">
+        <button class="sec" id="c4-linkbtn" onclick="c4LinkMode()">🔗 Связать</button>
+        <button class="sec" onclick="c4DeleteSel()">🗑 Удалить</button>
+      </div>
+      <b class="small" style="margin-top:8px">СВОЙСТВА</b>
+      <div id="c4-props"></div>
+      <div id="c4-status" class="small mut" style="margin-top:8px"></div>
+    </div>
+    <div class="c4-main">
+      <div class="c4-views">
+        ${Object.entries(C4_VIEWS).map(([v, t]) =>
+          `<button class="sec ${v===DSGN.view?'c4-vact':''}" data-view="${v}" onclick="c4SetView('${v}')">${t}</button>`).join('')}
+      </div>
+      <svg id="c4-svg" viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg">
+        <defs><marker id="c4-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+          markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker></defs>
+        <rect x="0" y="0" width="960" height="560" fill="none"/>
+        <g id="c4-g"></g>
+      </svg>
+    </div>
+  </div>
+  <pre id="c4-preview" class="chatcode" style="display:none;margin-top:12px;max-height:300px;overflow:auto"></pre>`;
+  c4Draw(); c4Props(); c4Status();
+  c4BindSvg();
+}
+
+function c4SetView(v){
+  DSGN.view = v; DSGN.sel = null; DSGN.selType = null; DSGN.linkFrom = null;
+  document.querySelectorAll('.c4-views button').forEach(b => b.classList.toggle('c4-vact', b.dataset.view === v));
+  const btn = [...document.querySelectorAll('.card button')].find(b => b.textContent.includes('AI-структура'));
+  if(btn) btn.setAttribute('onclick', `c4AI('${v}', this)`);
+  c4Draw(); c4Props(); c4Status();
+}
+
+function c4Draw(){
+  const g = document.getElementById('c4-g'); if(!g) return;
+  const m = c4M();
+  const center = n => ({x: n.x + C4_W/2, y: n.y + C4_H/2});
+  const trim = (a, b) => {   // обрезка линии по границам прямоугольников
+    const dx = b.x - a.x, dy = b.y - a.y;
+    if(!dx && !dy) return {a, b};
+    const t = Math.min(dx ? (C4_W/2) / Math.abs(dx) : 1e9, dy ? (C4_H/2) / Math.abs(dy) : 1e9);
+    return {a: {x: a.x + dx * t, y: a.y + dy * t}, b: {x: b.x - dx * t, y: b.y - dy * t}};
+  };
+  let edges = '';
+  for(const e of (m.edges || [])){
+    const f = c4Node(e.from), t = c4Node(e.to);
+    if(!f || !t) continue;
+    const p = trim(center(f), center(t));
+    const selE = DSGN.selType === 'edge' && DSGN.sel === e.id;
+    const lbl = esc(e.label || 'взаимодействует');
+    edges += `<line data-eid="${e.id}" x1="${p.a.x}" y1="${p.a.y}" x2="${p.b.x}" y2="${p.b.y}"
+      stroke="${selE ? '#e11d48' : '#64748b'}" stroke-width="${selE ? 3 : 1.6}" marker-end="url(#c4-arrow)"/>
+      <line data-eid="${e.id}" x1="${p.a.x}" y1="${p.a.y}" x2="${p.b.x}" y2="${p.b.y}"
+      stroke="transparent" stroke-width="12"/>
+      <text x="${(p.a.x + p.b.x)/2}" y="${(p.a.y + p.b.y)/2 - 5}" text-anchor="middle"
+      font-size="10.5" fill="#334155" style="paint-order:stroke" stroke="#f8fafc" stroke-width="4"
+      font-weight="600">${lbl}${e.tech ? ` · ${esc(e.tech)}` : ''}</text>`;
+  }
+  let nodes = '';
+  for(const n of (m.nodes || [])){
+    const ty = C4_TYPE[n.type] || C4_TYPE.container;
+    const selN = DSGN.selType === 'node' && DSGN.sel === n.id;
+    const isLinkFrom = DSGN.linkFrom === n.id;
+    const nm = n.name.length > 21 ? n.name.slice(0, 20) + '…' : n.name;
+    nodes += `<g data-nid="${n.id}" transform="translate(${n.x},${n.y})" style="cursor:grab">
+      <rect width="${C4_W}" height="${C4_H}" rx="10" fill="${ty.fill}"
+        stroke="${selN || isLinkFrom ? '#e11d48' : ty.line}" stroke-width="${selN || isLinkFrom ? 3 : ty.t==='system'?2.4:1.6}"
+        ${ty.dash ? `stroke-dasharray="${ty.dash}"` : ''}/>
+      <text x="${C4_W/2}" y="22" text-anchor="middle" font-size="14">${ty.icon}</text>
+      <text x="${C4_W/2}" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">${esc(nm)}</text>
+      <text x="${C4_W/2}" y="54" text-anchor="middle" font-size="9.5" fill="#475569">${esc((n.tech || ty.ru).slice(0, 26))}</text>
+    </g>`;
+  }
+  g.innerHTML = edges + nodes;
+}
+
+function c4Point(e){
+  const svg = document.getElementById('c4-svg');
+  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+let C4DRAG = null;
+function c4BindSvg(){
+  const svg = document.getElementById('c4-svg'); if(!svg) return;
+  svg.onmousedown = e => {
+    const eg = e.target.closest('[data-eid]');
+    if(eg && !DSGN.linkFrom){
+      DSGN.sel = eg.dataset.eid; DSGN.selType = 'edge'; DSGN.linkFrom = null;
+      c4Draw(); c4Props(); return;
+    }
+    const ng = e.target.closest('[data-nid]');
+    if(!ng){ DSGN.linkFrom = null; c4Draw(); c4Sel(null); return; }
+    const n = c4Node(ng.dataset.nid);
+    const p = c4Point(e);
+    C4DRAG = {id: n.id, sx: p.x, sy: p.y, ox: n.x, oy: n.y, moved: false};
+    e.preventDefault();
+  };
+  svg.onmousemove = e => {
+    if(!C4DRAG) return;
+    const n = c4Node(C4DRAG.id); if(!n) return;
+    const p = c4Point(e);
+    const dx = p.x - C4DRAG.sx, dy = p.y - C4DRAG.sy;
+    if(Math.abs(dx) + Math.abs(dy) > 3) C4DRAG.moved = true;
+    n.x = Math.max(0, Math.min(960 - C4_W, C4DRAG.ox + dx));
+    n.y = Math.max(0, Math.min(560 - C4_H, C4DRAG.oy + dy));
+    c4Draw();
+  };
+  svg.onmouseup = () => {
+    if(C4DRAG && !C4DRAG.moved){
+      const id = C4DRAG.id;
+      if(DSGN.linkFrom && DSGN.linkFrom !== id){
+        const m = c4M();
+        m.edges.push({id: 'e' + Date.now(), from: DSGN.linkFrom, to: id, label: '', tech: ''});
+        DSGN.linkFrom = null;
+        document.getElementById('c4-linkbtn').classList.remove('c4-vact');
+        c4Draw(); c4Status(); c4SaveSoon();
+      } else if(!DSGN.linkFrom){ c4Sel(id, 'node'); }
+      else { DSGN.linkFrom = null; c4Draw(); }
+    } else if(C4DRAG && C4DRAG.moved){ c4SaveSoon(); }
+    C4DRAG = null;
+  };
+  svg.onmouseleave = () => { if(C4DRAG && C4DRAG.moved) c4SaveSoon(); C4DRAG = null; };
+}
+
+document.addEventListener('keydown', e => {
+  if(!document.getElementById('c4-svg')) return;
+  if(e.target.matches('input,textarea,select')) return;
+  if((e.key === 'Delete' || e.key === 'Backspace') && DSGN.sel){ e.preventDefault(); c4DeleteSel(); }
+  if(e.key === 'Escape'){ DSGN.linkFrom = null; c4Sel(null); c4Draw(); }
+});
+
+function c4Sel(id, type){
+  DSGN.sel = id; DSGN.selType = id ? type : null;
+  c4Draw(); c4Props();
+}
+
+function c4Add(type){
+  const m = c4M();
+  const n = {id: 'n' + Date.now(), type, name: C4_TYPE[type].ru, desc: '', tech: '',
+             x: 60 + Math.round(Math.random() * 14) * 40, y: 60 + Math.round(Math.random() * 9) * 40};
+  m.nodes.push(n);
+  c4Sel(n.id, 'node'); c4Status(); c4SaveSoon();
+}
+
+function c4LinkMode(){
+  DSGN.linkFrom = null;
+  const btn = document.getElementById('c4-linkbtn');
+  const on = !btn.classList.contains('c4-vact');
+  btn.classList.toggle('c4-vact', on);
+  if(on) toast('Режим связи: кликните <b>источник</b>, затем <b>цель</b> (Esc — отмена)');
+  c4Status();
+}
+
+function c4DeleteSel(){
+  const m = c4M(); if(!DSGN.sel) return toast('Ничего не выбрано', true);
+  if(DSGN.selType === 'node'){
+    m.nodes = m.nodes.filter(n => n.id !== DSGN.sel);
+    m.edges = m.edges.filter(e => e.from !== DSGN.sel && e.to !== DSGN.sel);
+  } else {
+    m.edges = m.edges.filter(e => e.id !== DSGN.sel);
+  }
+  c4Sel(null); c4Status(); c4SaveSoon();
+}
+
+function c4Props(){
+  const el = document.getElementById('c4-props'); if(!el) return;
+  if(!DSGN.sel){ el.innerHTML = '<p class="small mut">Выберите элемент на холсте.<br>🔗 Связать: кликните источник → цель.</p>'; return; }
+  if(DSGN.selType === 'node'){
+    const n = c4Node(DSGN.sel); if(!n) return;
+    el.innerHTML = `
+      <label>Тип</label><select onchange="c4Set('type', this.value)">
+        ${C4_TYPES.map(x => `<option value="${x.t}" ${x.t===n.type?'selected':''}>${x.icon} ${x.ru}</option>`).join('')}</select>
+      <label>Название</label><input value="${esc(n.name)}" oninput="c4Set('name', this.value)">
+      <label>Технология</label><input value="${esc(n.tech)}" oninput="c4Set('tech', this.value)" placeholder="FastAPI, PostgreSQL…">
+      <label>Описание</label><textarea rows="2" oninput="c4Set('desc', this.value)">${esc(n.desc)}</textarea>`;
+  } else {
+    const e = c4Edge(DSGN.sel); if(!e) return;
+    const f = c4Node(e.from), t = c4Node(e.to);
+    el.innerHTML = `
+      <p class="small mut" style="margin:0 0 6px">${esc(f?.name||'?')} → ${esc(t?.name||'?')}</p>
+      <label>Что передаёт</label><input value="${esc(e.label)}" oninput="c4Set('label', this.value)" placeholder="запросы, платежи…">
+      <label>Технология</label><input value="${esc(e.tech)}" oninput="c4Set('tech', this.value)" placeholder="HTTPS, gRPC…">`;
+  }
+}
+
+function c4Set(k, v){
+  const o = DSGN.selType === 'node' ? c4Node(DSGN.sel) : c4Edge(DSGN.sel);
+  if(!o) return;
+  o[k] = v;
+  c4Draw(); c4Status(); c4SaveSoon();
+}
+
+function c4Status(note){
+  const el = document.getElementById('c4-status'); if(!el) return;
+  const m = c4M();
+  el.innerHTML = `<b>${esc(C4_VIEWS[DSGN.view])}</b>: узлов ${m.nodes.length} · связей ${m.edges.length}`
+    + (note ? ` · ${esc(note)}` : '')
+    + (DSGN.linkFrom ? ' · <b style="color:#e11d48">режим связи: выберите цель</b>' : '');
+}
+
+function c4SaveSoon(){
+  clearTimeout(DSGN.saveT);
+  DSGN.saveT = setTimeout(c4Save, 1200);
+}
+
+async function c4Save(){
+  try{
+    const m = c4M();
+    await api(`/services/${DSGN.sid}/c4/${DSGN.view}`,
+      {method:'PUT', body: JSON.stringify({model: {nodes: m.nodes, edges: m.edges}})});
+    c4Status('сохранено');
+  }catch(e){ toast(esc(e.message), true); }
+}
+
+async function c4AI(view, btn){
+  if(c4M().nodes.length && !confirm('Заменить текущую модель ' + C4_VIEWS[view] + ' AI-структурой?')) return;
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ Проектирую…';
+  try{
+    const r = await api(`/services/${DSGN.sid}/c4/${view}/ai`,
+      {method:'POST', body: JSON.stringify({model: chatModelSel()})});
+    DSGN.models[view] = {nodes: r.model_json.nodes, edges: r.model_json.edges};
+    c4SetView(view);
+    toast(`${r.provider === 'ai-buddy' ? 'AI-структура (' + esc(r.model||'') + ')' : 'Стартовая структура'} для ${esc(C4_VIEWS[view])} загружена в редактор — <b>проверьте и поправьте</b>`);
+  }catch(e){ toast(esc(e.message), true); }
+  btn.disabled = false; btn.textContent = old;
+}
+
+async function c4Preview(btn){
+  try{
+    const r = await api(`/services/${DSGN.sid}/c4/export`,
+      {method:'POST', body: JSON.stringify({dry_run: true})});
+    const pre = document.getElementById('c4-preview');
+    if(!r.code){ pre.style.display = 'none'; return toast('Модели пусты — предпросмотра нет', true); }
+    pre.style.display = 'block';
+    pre.textContent = r.code;
+    toast('Предпросмотр Mermaid-исходника ниже (в артефакт не записан)');
+  }catch(e){ toast(esc(e.message), true); }
+}
+
+async function c4Export(btn){
+  btn.disabled = true; const old = btn.textContent; btn.textContent = '⏳ Экспортирую…';
+  try{
+    const r = await api(`/services/${DSGN.sid}/c4/export`, {method:'POST'});
+    toast(r.updated
+      ? `Mermaid C4-исходник (${r.code_len} симв.) записан в артефакт <b>Vision</b> — «Диаграммы» и self-check увидят L1/L2`
+      : 'Модели пусты — исходник диаграммы очищен');
+  }catch(e){ toast(esc(e.message), true); }
+  btn.disabled = false; btn.textContent = old;
 }
 
 /* ---------- MVP2: AI-ассистент по стандарту (BR-48…50) — чат в стиле ChatGPT ---------- */
