@@ -165,7 +165,7 @@ textarea.diagcode{min-height:180px;font-size:12px}
   padding:16px;min-height:200px;max-height:480px}
 .diag svg{max-width:100%;height:auto}
 .diag-stack{flex-direction:column;align-items:stretch}
-.diag-stack>div{margin:0 auto}
+.diag-stack>div{margin:0 auto;width:100%}
 .diag .empty{color:var(--faint);font-size:12.5px;text-align:center;margin:auto;padding:30px;line-height:1.7}
 .diag-err{background:var(--bad-soft);border-color:var(--bad-line)}
 
@@ -414,3 +414,37 @@ details.aireview-item > *:not(summary){padding:0 12px 9px}
   border-radius:6px;padding:1px 7px;margin-left:6px;vertical-align:1px}
 .aireview-std{display:inline-block;font-size:11px;color:#57534e;background:var(--surface2);
   border:1px solid var(--line);border-radius:6px;padding:1px 7px;margin-left:6px;vertical-align:1px}
+.aireview-act{display:flex;gap:12px;align-items:center;margin-top:8px}
+.aireview-fixbtn{font-size:12px;padding:3px 12px}
+.aireview-fixbox{border:1px solid var(--line);border-left:3px solid #4338ca;border-radius:10px;
+  background:var(--surface);padding:10px 14px;margin:0 0 12px}
+.aifix-ta{width:100%;min-height:180px;font-family:ui-monospace,monospace;font-size:12px;
+  border:1px solid var(--line);border-radius:8px;padding:8px;margin:4px 0 8px;resize:vertical;background:var(--surface2)}
+.aifix-pre{white-space:pre-wrap;max-height:220px;overflow:auto;border:1px solid var(--line);
+  border-radius:8px;padding:8px;background:var(--surface2);margin:6px 0 0}
+/* --- Пакет (read-only вьюха архитектуры) --- */
+.pk-head{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:8px 0 6px}
+.pk-toc{display:flex;gap:6px;flex-wrap:wrap;position:sticky;top:0;background:var(--bg,#fff);
+  padding:8px 0;z-index:5;border-bottom:1px solid var(--line)}
+.pk-toc a{cursor:pointer;font-size:12px;padding:2px 10px;border:1px solid var(--line);border-radius:12px;
+  background:var(--surface2);color:var(--txt)}
+.pk-toc a.pk-toc-empty{color:#a1a1aa}
+.pk-sec h2{margin:4px 0 8px;font-size:17px}
+.pk-sep{border:0;border-top:1px solid var(--line);margin:16px 0}
+.pk-table{border-collapse:collapse;font-size:13px;width:100%;margin:8px 0}
+.pk-table th,.pk-table td{border:1px solid var(--line);padding:5px 9px;text-align:left;vertical-align:top}
+.pk-table th{background:var(--surface2)}
+.pk-h{margin:12px 0 4px}
+.pk-p{margin:6px 0;line-height:1.55}
+.pk-ul{margin:6px 0;padding-left:20px;line-height:1.5}
+.pk-diag{margin:12px 0;max-height:none}
+.pk-edit{white-space:nowrap}
+.pk-hdrbtn{display:inline-flex;align-items:center;gap:7px;background:var(--accent);color:#fff;
+  border-radius:9px;padding:8px 16px;font-size:14px;font-weight:600;white-space:nowrap;
+  box-shadow:0 1px 2px rgba(0,0,0,.08);text-decoration:none}
+.pk-hdrbtn:hover{background:var(--accent-hover)}
+.pk-hdrbtn svg{flex:0 0 auto;opacity:.95}
+.pk-hdrbtn-act{background:var(--accent-hover);box-shadow:inset 0 0 0 2px #fff5}
+.pk-hdrbtn-sec{background:var(--surface);border:1px solid var(--line-strong);color:var(--txt);box-shadow:none}
+.pk-hdrbtn-sec:hover{background:var(--surface2)}
+.pk-hdrbtn-sec svg{opacity:.7}

@@ -8,8 +8,37 @@ const api = (path, opts={}) => fetch('/api'+path, {
 let S = { user:null, standard:null };
 /* Mermaid: C4 / deployment / ER / flowchart */
 if(window.mermaid){
-  mermaid.initialize({ startOnLoad:false, theme:'neutral', securityLevel:'strict',
-    flowchart:{ useMaxWidth:true }, c4:{ useMaxWidth:true }, er:{ useMaxWidth:true } });
+  /* фирменная тема в палитре дизайн-системы (zinc + индиго): base-тема позволяет
+     переопределить цвета; personBkg/primaryColor управляют и C4-фигурами */
+  mermaid.initialize({ startOnLoad:false, securityLevel:'strict', theme:'base',
+    themeVariables:{
+      fontFamily:'Inter, ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif',
+      fontSize:'14px',
+      primaryColor:'#eef2ff', primaryBorderColor:'#6366f1', primaryTextColor:'#312e81',
+      secondaryColor:'#f4f4f5', tertiaryColor:'#faf5ff',
+      mainBkg:'#eef2ff', nodeBorder:'#6366f1',
+      lineColor:'#71717a', textColor:'#18181b',
+      personBkg:'#eef2ff', personBorder:'#6366f1',
+      labelTextColor:'#1e1b4b',
+      clusterBkg:'#fafafa', clusterBorder:'#e4e4e7',
+      edgeLabelBackground:'#f4f4f5' },
+    flowchart:{ useMaxWidth:true, nodeSpacing:60, rankSpacing:70, padding:10 },
+    c4:{ useMaxWidth:true, diagramMarginX:28, diagramMarginY:28, boxMargin:32, boxTextMargin:10,
+      /* фирменная светлая палитра C4 вместо классической navy (#08427B);
+         цвет текста подстраивается автоматически (_c4Contrast) */
+      person_bg_color:'#eef2ff', person_border_color:'#6366f1',
+      external_person_bg_color:'#f4f4f5', external_person_border_color:'#71717a',
+      system_bg_color:'#eef2ff', system_border_color:'#6366f1',
+      system_db_bg_color:'#eef2ff', system_db_border_color:'#6366f1',
+      system_queue_bg_color:'#eef2ff', system_queue_border_color:'#6366f1',
+      external_system_bg_color:'#f4f4f5', external_system_border_color:'#a1a1aa',
+      external_system_db_bg_color:'#f4f4f5', external_system_db_border_color:'#a1a1aa',
+      container_bg_color:'#faf5ff', container_border_color:'#a855f7',
+      container_db_bg_color:'#faf5ff', container_db_border_color:'#a855f7',
+      external_container_bg_color:'#f4f4f5', external_container_border_color:'#a1a1aa',
+      external_container_db_bg_color:'#f4f4f5', external_container_db_border_color:'#a1a1aa',
+      component_bg_color:'#ecfdf5', component_border_color:'#10b981' },
+    er:{ useMaxWidth:true } });
 }
 const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const badge = (txt, cls) => `<span class="badge b-${cls}">${esc(txt)}</span>`;
@@ -84,7 +113,7 @@ async function logout(){
 route(/^#\/$/, viewDash);
 route(/^#\/admin$/, viewAdmin);
 route(/^#\/services$/, viewServices);
-route(/^#\/service\/(\d+)(?:\/(\w+))?$/, (id, tab) => viewService(+id, tab));
+route(/^#\/service\/(\d+)(?:\/(\w+))?(?:#([\w-]+))?$/, (id, tab, frag) => viewService(+id, tab, frag));
 route(/^#\/components$/, viewComponents);
 route(/^#\/debts$/, viewDebts);
 // ассистент больше не страница, а панель поверх любого экрана;
@@ -274,7 +303,7 @@ const ARTIFACT_TAB = () => ['artifacts','Артефакты' + (S.standard ? ` (
 const TABS = [['card','Карточка'],ARTIFACT_TAB(),['review','Ревью'],['components','Компоненты']]; // базовый список (полный собирается в viewService)
 let SERVICE = null;
 let _VS_GEN = 0;                    // защита от гонки: у каждого вызова viewService свой номер
-async function viewService(id, tab='card'){
+async function viewService(id, tab='card', frag=''){
   if(tab === 'check'){                          // self-check интегрирован в «Ревью» — старые ссылки работают
     location.hash = `#/service/${id}/review`; return;
   }
@@ -301,11 +330,13 @@ async function viewService(id, tab='card'){
       ${s.my_scope==='full'?'полный доступ':s.my_scope==='team'?'доступ команды':'только просмотр'}</span>`:''}
     <span class="chip">тип: <b>${esc(S.standard.project_types[s.project_type]?.title||s.project_type)}</b></span>
     ${s.cmdb_id?`<span class="chip">CMDB: <b>${esc(s.cmdb_id)}</b></span>`:''}
+    <a class="pk-hdrbtn${active==='packet'?' pk-hdrbtn-act':''}" href="#/service/${id}/packet"
+       title="Весь архитектурный пакет как один документ: диаграммы, таблицы, оглавление (read-only)">${PK_ICON_BOOK} Обзор</a>
   </div>
   <div class="tabs">${tabs.map(([k,t])=>`<a class="${k===active?'act':''}" href="#/service/${id}/${k}">${t}</a>`).join('')}</div>
   <div id="tabbody"></div>`;
-  ({card:tabCard, reqs:tabReqs, design:tabDesign, artifacts:tabArtifacts, review:tabReview,
-    components:tabComponents, debt:tabDebt, fitness:tabFitness, nfr:tabNfr}[active])(s);
+  ({card:tabCard, reqs:tabReqs, design:tabDesign, packet:tabPacket, artifacts:tabArtifacts, review:tabReview,
+    components:tabComponents, debt:tabDebt, fitness:tabFitness, nfr:tabNfr}[active])(s, frag);
 }
 
 /* ---------- диаграммы (Mermaid) ---------- */
@@ -338,6 +369,24 @@ function splitDiagrams(code){
   if(cur) blocks.push(cur);
   return blocks.filter(b=>b.code.trim());
 }
+/* Mermaid красит текст C4-фигур белым с !important (рассчитан на тёмную классическую
+   палитру). Со светлой фирменной палитрой нужен авто-контраст: по яркости заливки
+   фигуры выбираем тёмный или белый текст. Вызывается после вставки SVG в DOM. */
+function _c4Contrast(root){
+  root.querySelectorAll('g.node.c4-shape').forEach(node => {
+    const shape = node.querySelector('[style*="fill"]');
+    const m = shape && /fill:\s*(#[0-9a-fA-F]{3,6})/.exec(shape.getAttribute('style') || '');
+    if(!m) return;
+    const hex = m[1].length === 4 ? '#' + [...m[1].slice(1)].map(c => c + c).join('') : m[1];
+    const lum = 0.299 * parseInt(hex.slice(1,3), 16) + 0.587 * parseInt(hex.slice(3,5), 16) + 0.114 * parseInt(hex.slice(5,7), 16);
+    const label = node.querySelector('g.label');
+    if(label){
+      const col = lum > 150 ? '#1e1b4b' : '#ffffff';
+      label.style.setProperty('color', col, 'important');
+      label.querySelectorAll('text').forEach(t => t.style.setProperty('fill', col, 'important'));
+    }
+  });
+}
 async function renderDiag(el, code){
   if(!el) return;
   if(!window.mermaid){ el.innerHTML = '<span class="mut small">Mermaid не загрузился</span>'; return; }
@@ -365,6 +414,7 @@ async function renderDiag(el, code){
   }
   el.classList.toggle('diag-err', bad);
   el.innerHTML = parts.join('');
+  _c4Contrast(el);
 }
 const _stepLink = (sid, t) =>
   /Заполнить артефакты/.test(t) ? `#/service/${sid}/artifacts` :
@@ -426,6 +476,97 @@ async function exportCatalog(id){
 const DIAG_KINDS = ['vision_c4', 'deployment', 'data_model'];
 let ART_JUMP = null;              // переход из галереи «Проектирования»: открыть и проскроллить
 const _artFilled = k => !!(k && (((k.content_md||'').trim()) || ((k.diagram_code||'').trim())));
+
+/* ---------- Пакет: человекочитаемая вьюха архитектуры (read-only) ---------- */
+const PK_ICON_BOOK = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>';
+const PK_ICON_PENCIL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+function mdDoc(src){
+  /* Рендер markdown пакета для чтения: escape-first, затем структурные блоки —
+     код-фенсы, заголовки, GFM-таблицы, списки, абзацы, ссылки (только http/https/#).
+     Без внешних зависимостей (расширение идеологии mdLite из чата). */
+  const lines = esc((src || '').replace(/<!--[\s\S]*?-->/g, '')).split('\n');
+  const inline = t => t
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+|#[^)\s]*)\)/g,
+             '<a class="lnk" href="$2" target="_blank" rel="noopener">$1</a>');
+  const out = [];
+  let i = 0;
+  while(i < lines.length){
+    const ln = lines[i];
+    if(/^\s*```/.test(ln)){                      // код-фенс: до закрывающего
+      const buf = []; i++;
+      while(i < lines.length && !/^\s*```/.test(lines[i])){ buf.push(lines[i]); i++; }
+      i++;                                       // закрывающий фенс (или конец)
+      out.push(`<pre class="chatcode"><code>${buf.join('\n')}</code></pre>`);
+      continue;
+    }
+    const h = ln.match(/^(#{1,6})\s+(.*)$/);
+    if(h){ const lvl = Math.min(h[1].length + 1, 5);
+      out.push(`<h${lvl} class="pk-h">${inline(h[2])}</h${lvl}>`); i++; continue; }
+    if(/^\s*\|.*\|\s*$/.test(ln) && i + 1 < lines.length
+       && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])){     // GFM-таблица
+      const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => inline(c.trim()));
+      const head = cells(ln); i += 2;
+      const rows = [];
+      while(i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])){ rows.push(cells(lines[i])); i++; }
+      out.push(`<div style="overflow:auto"><table class="pk-table"><thead><tr>${head.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+      continue;
+    }
+    if(/^\s*([-*·]|\d+[.)])\s+/.test(ln)){       // список: подряд идущие пункты
+      const items = [];
+      while(i < lines.length && /^\s*([-*·]|\d+[.)])\s+/.test(lines[i])){
+        items.push(lines[i].replace(/^\s*([-*·]|\d+[.)])\s+/, '')); i++;
+      }
+      out.push(`<ul class="pk-ul">${items.map(t=>`<li>${inline(t)}</li>`).join('')}</ul>`);
+      continue;
+    }
+    if(!ln.trim()){ i++; continue; }
+    const buf = [ln]; i++;                       // абзац до пустой строки/блока
+    while(i < lines.length && lines[i].trim()
+          && !/^\s*([-*·]|\d+[.)])\s+/.test(lines[i]) && !/^\s*\|.*\|\s*$/.test(lines[i])
+          && !/^#{1,6}\s+/.test(lines[i]) && !/^\s*```/.test(lines[i])){
+      buf.push(lines[i]); i++;
+    }
+    out.push(`<p class="pk-p">${inline(buf.join('<br>'))}</p>`);
+  }
+  return out.join('');
+}
+function tabPacket(s, frag){
+  const byKind = Object.fromEntries(s.artifacts.map(a => [a.kind, a]));
+  const secs = S.standard.artifacts.map(a => {
+    const cur = byKind[a.kind] || {};
+    const body = (cur.content_md || '').trim();
+    const diag = (cur.diagram_code || '').trim();
+    const filled = _artFilled(cur);
+    const noSrc = filled && !(cur.source_url || '').trim();
+    const chip = filled
+      ? `<span class="chip" style="background:#ecfdf5;color:#047857">✓ заполнен${noSrc?' · нет исходника':''}</span>`
+      : `<span class="chip" style="background:var(--surface2);color:#52525b">✗ пуст</span>`;
+    return {kind: a.kind, title: a.title, chip, filled, body, diag,
+            html: `<section class="pk-sec" id="pk-${a.kind}">
+      <h2>${esc(a.title)} ${chip}</h2>
+      ${body ? mdDoc(body) : '<p class="small mut">Артефакт не заполнен — раздел появится после заполнения во вкладке «Артефакты».</p>'}
+      ${diag ? `<div class="diag pk-diag" id="pkd-${a.kind}"></div>` : ''}
+    </section>`};
+  });
+  const meta = `<p class="small mut" style="margin:0 0 4px">${esc(s.name)} (${esc(s.code)}) · домен: ${esc(s.domain||'—')} ·
+    тип: ${esc(S.standard.project_types[s.project_type]?.title||s.project_type)} ·
+    владелец: ${esc(s.owner||'—')} · архитектор: ${esc(s.architect||'—')}</p>`;
+  $('#tabbody').innerHTML = `
+    ${meta}
+    <div class="pk-head">
+      <span class="small mut">Обзор пакета в порядке Architecture Definition Set — читается как документ.
+      Advisory: представление read-only, редактирование — во вкладке «Артефакты».</span>
+      <a class="pk-hdrbtn pk-hdrbtn-sec pk-edit" href="#/service/${s.id}/artifacts">${PK_ICON_PENCIL} Редактировать</a>
+    </div>
+    <nav class="pk-toc">${secs.map(x =>
+      `<a class="${x.filled?'':'pk-toc-empty'}" onclick="document.getElementById('pk-${x.kind}').scrollIntoView({block:'start'})">${x.filled?'✓':'✗'} ${esc(x.title)}</a>`).join('')}</nav>
+    <div class="card" style="margin-top:10px">${secs.map(x => x.html).join('<hr class="pk-sep">')}</div>`;
+  // диаграммы — рендерим после вставки в DOM (mermaid.render требует живого элемента)
+  secs.filter(x => x.diag).forEach(x => renderDiag(document.getElementById('pkd-' + x.kind), x.diag));
+  if(frag){ const t = document.getElementById('pk-' + frag); if(t) t.scrollIntoView({block:'start'}); }
+}
 
 function tabArtifacts(s){
   const ed = canEditSvc(s);
@@ -569,6 +710,8 @@ function tabReview(s){
     содержательные риски и несоответствия. Advisory (BR-33): находки не блокируют отправку —
     решение за автором и ревьюером.</p>
     <div class="btnrow">
+      <a class="pk-hdrbtn pk-hdrbtn-sec" href="#/service/${s.id}/packet"
+         title="Человекочитаемый обзор всего пакета: диаграммы, таблицы, оглавление">${PK_ICON_BOOK} Открыть обзор</a>
       ${s.review_status==='in_review'
         ? `<span class="chip">Ревью идёт · запрошено <b>${esc(open?.requested_by||'')}</b></span>`
         : `<button id="btn-send-review" onclick="requestReview(${s.id})" ${canSend?'':'disabled'}>Отправить на ревью</button>
@@ -622,6 +765,7 @@ async function svcReadiness(sid){
 }
 /* ---------- AI-ревью до отправки (advisory, BR-33) ---------- */
 let AI_LAST = null;      // последний прогон для текущего сервиса (кэш вердикта между async-рендерами)
+let AI_SID = null;       // сервис текущего прогона (кнопки «Исправить» должны знать цель)
 const AI_KIND = {противоречие:'Противоречие', риск:'Риск', пробел:'Не хватает', несоответствие:'Расхождение'};
 function paintAiVerdict(){
   /* Вердикт AI-ревью живёт в строке рядом с гейтом готовности — один сводный статус */
@@ -652,20 +796,33 @@ function aiSection(title, cls, findings){
     const art = esc(f.artifact || f.artifact_kind || '');
     const aiTag = f.layer==='llm' ? ` <span class="aireview-ai">AI-анализ</span>` : '';
     const stdTag = f.std ? ` <span class="aireview-std" title="Пункт корпоративного стандарта">📖 ${esc(f.std)}</span>` : '';
+    const idx = AI_LAST ? AI_LAST.findings.indexOf(f) : -1;
+    const fixAct = (f.fix && idx >= 0 && AI_SID) ? `<div class="aireview-act">
+      <button class="sec aireview-fixbtn" onclick="aiReviewFix(${AI_SID},${idx})"
+        title="AI подготовит черновик правки артефакта с учётом находки — примените после проверки (advisory)">🔧 Исправить</button>
+      ${f.target?`<a class="lnk small" href="${esc(f.target)}">Перейти →</a>`:''}</div>` : '';
     const inner = `<b>${kind}${art?` · ${art}`:''}: ${esc(f.title)}</b>${aiTag}${stdTag}
       ${f.detail?`<div class="small">${esc(f.detail)}</div>`:''}
       ${f.evidence?`<div class="small mut">Доказательство: ${esc(f.evidence)}</div>`:''}`;
     const cls2 = `aireview-item${f.severity==='warning'?' aireview-warn':''}`;
-    return f.target
-      ? `<a class="${cls2} lnk" href="${esc(f.target)}">${inner}</a>`
-      : `<div class="${cls2}">${inner}</div>`;
+    return (f.fix && idx >= 0 && AI_SID)
+      ? `<div class="${cls2}">${inner}${fixAct}</div>`
+      : f.target
+        ? `<a class="${cls2} lnk" href="${esc(f.target)}">${inner}</a>`
+        : `<div class="${cls2}">${inner}</div>`;
   };
   const groupCard = g => g.items.length === 1 ? card(g.lead) : (() => {
     const lead = g.lead;
     const generic = lead.title.replace(/«[^»]+»/g, '«…»');
-    const list = g.items.map(f => f.artifact || f.artifact_kind
-      ? `<li><a class="lnk" href="${esc(f.target||'#')}">${esc(f.artifact || f.artifact_kind)}</a></li>`
-      : '').join('');
+    const list = g.items.map(f => {
+      const idx = AI_LAST ? AI_LAST.findings.indexOf(f) : -1;
+      const fix = (f.fix && idx >= 0 && AI_SID)
+        ? ` <button class="sec aireview-fixbtn" onclick="aiReviewFix(${AI_SID},${idx})"
+            title="AI подготовит черновик правки артефакта с учётом находки (advisory)">🔧 Исправить</button>` : '';
+      return f.artifact || f.artifact_kind
+        ? `<li><a class="lnk" href="${esc(f.target||'#')}">${esc(f.artifact || f.artifact_kind)}</a>${fix}</li>`
+        : '';
+    }).join('');
     return `<details class="aireview-item${lead.severity==='warning'?' aireview-warn':''}">
       <summary><b>${esc(AI_KIND[lead.kind]||lead.kind)}: ${esc(generic)}</b> <span class="mut">· ${g.items.length} артефактов</span></summary>
       ${lead.detail?`<div class="small" style="margin-top:4px">${esc(lead.detail)}</div>`:''}
@@ -683,6 +840,7 @@ function renderAiReview(el, r){
   const info = r.findings.filter(f=>f.severity!=='warning');
   const dyn = r.previous ? ` · прошлый прогон: ${r.previous.total} → ${r.findings.length} находок` : '';
   el.innerHTML = `
+    <div id="svc-aireview-fix"></div>
     ${r.note?`<p class="small mut" style="margin:0 0 8px">${esc(r.note)}</p>`:''}
     ${aiSection(`⚠ Серьёзные — ${warn.length}`, 'aireview-h-warn', warn)}
     ${aiSection(`ℹ️ Замечания — ${info.length}`, 'aireview-h-info', info)}
@@ -691,7 +849,7 @@ function renderAiReview(el, r){
     Advisory (BR-33): находки — рекомендации, отправку не блокируют.</p>`;
 }
 async function svcAiReviewLoad(sid){
-  AI_LAST = null; paintAiVerdict();       // чужой вердикт не переживает смену сервиса
+  AI_LAST = null; AI_SID = sid; paintAiVerdict();   // чужой вердикт не переживает смену сервиса
   const el = document.getElementById('svc-aireview'); if(!el) return;
   try{
     const r = await api(`/services/${sid}/ai-review`);
@@ -714,6 +872,46 @@ async function aiReview(sid){
                : 'AI-ревью: серьёзных находок нет');
   }catch(e){ toast(esc(e.message), true); }
   if(btn){ btn.disabled = false; btn.textContent = '🧠 AI-ревью'; }
+}
+async function aiReviewFix(sid, idx){
+  const f = ((AI_LAST||{}).findings||[])[idx]; if(!f) return;
+  const slot = document.getElementById('svc-aireview-fix'); if(!slot) return;
+  slot.innerHTML = `<div class="aireview-fixbox"><p class="small mut">⏳ Готовлю предложение исправления (LLM, до ~1 мин)…</p></div>`;
+  try{
+    const r = await api(`/services/${sid}/ai-review/fix`, {method:'POST', body: JSON.stringify({
+      kind:f.kind, artifact_kind:f.artifact_kind, title:f.title, detail:f.detail,
+      std:f.std||'', severity:f.severity, layer:f.layer||''})});
+    if(!slot.isConnected) return;   // вкладка сменилась за время LLM
+    const before = r.before||{}, after = r.after||{};
+    slot.innerHTML = `
+      <div class="aireview-fixbox">
+        <div class="aireview-h aireview-h-info">🔧 Предложение исправления · ${esc(r.artifact||r.artifact_kind||'')}</div>
+        <p class="small mut" style="margin:4px 0 8px">${esc(r.note||'')} Advisory (BR-33): правка применяется только после вашего подтверждения, ничего не сохраняется до кнопки «Применить».</p>
+        <label class="small"><b>Новый текст артефакта</b> (можно отредактировать перед применением):</label>
+        <textarea id="aifix-content" class="aifix-ta">${esc(after.content_md||'')}</textarea>
+        ${after.diagram_code?`<label class="small"><b>Mermaid-диаграмма:</b></label>
+        <textarea id="aifix-diagram" class="aifix-ta">${esc(after.diagram_code)}</textarea>`:''}
+        ${before.content_md?`<details class="small" style="margin:4px 0 0"><summary>Текущий текст артефакта (до правки)</summary><pre class="aifix-pre">${esc(before.content_md)}</pre></details>`:''}
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="pri" onclick="aiReviewFixApply(${sid},'${esc(r.artifact_kind)}')">✓ Применить</button>
+          <button class="sec" onclick="aiReviewFixCancel()">✕ Отмена</button>
+        </div>
+      </div>`;
+    toast('Предложение готово — проверьте, при необходимости отредактируйте и примените');
+  }catch(e){ slot.innerHTML = `<div class="aireview-fixbox"><p class="small">Не удалось подготовить предложение: ${esc(e.message)}</p></div>`; }
+}
+async function aiReviewFixApply(sid, kind){
+  const content = document.getElementById('aifix-content'); if(!content) return;
+  const diag = document.getElementById('aifix-diagram');
+  try{
+    await api(`/services/${sid}/artifacts/${kind}`, {method:'PUT', body: JSON.stringify(
+      diag ? {content_md: content.value, diagram_code: diag.value} : {content_md: content.value})});
+    toast('Исправление применено — перепрогоните 🧠 AI-ревью, чтобы обновить находки');
+    aiReviewFixCancel();
+  }catch(e){ toast(esc(e.message), true); }
+}
+function aiReviewFixCancel(){
+  const s = document.getElementById('svc-aireview-fix'); if(s) s.innerHTML = '';
 }
 async function requestReview(sid){
   if(SERVICE && SERVICE.id===sid && SERVICE.review_status==='approved'

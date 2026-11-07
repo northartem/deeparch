@@ -123,6 +123,58 @@ def test_parse_findings_json_salvage():
     assert parse("никакого json здесь нет") is None
 
 
+def test_fix_strategy_and_proposal(client, auth):
+    """Кнопка «Исправить» (advisory): разметка находок + предложение правки
+    только для надёжных типов; предложение ничего не сохраняет."""
+    from app.ai_review import _fix_strategy, _placeholder
+    A = auth["admin"]
+    sid = _make_service(client, auth, "AIRE7")["id"]
+    # разметка: пустые/шаблонные Threat Model и DRP/BCP исправимы черновиком
+    assert _fix_strategy(sid, "threat_model") == "draft"
+    assert _fix_strategy(sid, "drp_bcp") == "draft"
+    assert _fix_strategy(sid, "adr") is None and _fix_strategy(sid, "vision_c4") is None
+    assert _fix_strategy(sid, "nfr_security") is None   # нет НФТ-требований
+    assert _placeholder("раздел\n[TODO: уточнить у ИБ]") and not _placeholder("# NFR\nRPS 500")
+    # 403: viewer без прав на сервис
+    r = client.post(f"/api/services/{sid}/ai-review/fix", headers=auth["viewer"],
+                    json={"artifact_kind": "threat_model"})
+    assert r.status_code == 403, r.text
+    # draft-стратегия: предложение без LLM (mock) не изменяет артефакт
+    r = client.post(f"/api/services/{sid}/ai-review/fix", headers=A,
+                    json={"artifact_kind": "threat_model", "title": "Threat Model пуст",
+                          "std": "FR-14.2"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["strategy"] == "draft" and d["artifact_kind"] == "threat_model"
+    assert d["provider"] == "mock" and d["after"]["content_md"].strip()
+    assert d["before"]["content_md"] == "" and d["finding"]["std"] == "FR-14.2"
+    # несохранение: артефакт по-прежнему пуст (правка только через PUT автором)
+    arts = client.get(f"/api/services/{sid}", headers=A).json()["artifacts"]
+    tm = next(a for a in arts if a["kind"] == "threat_model")
+    assert not (tm["content_md"] or "").strip()
+    # находки прогона размечены: пустой threat_model → fix=draft, у Vision fix=None
+    run = client.post(f"/api/services/{sid}/ai-review", headers=A, json={}).json()
+    marked = {f["artifact_kind"]: f["fix"] for f in run["findings"] if f["artifact_kind"]}
+    if "threat_model" in marked:
+        assert marked["threat_model"] == "draft"
+    assert marked.get("vision_c4") is None
+    # неисправимые типы и NFR без НФТ — 400
+    for kind in ("adr", "nfr_security"):
+        r = client.post(f"/api/services/{sid}/ai-review/fix", headers=A,
+                        json={"artifact_kind": kind, "title": "x"})
+        assert r.status_code == 400, (kind, r.text)
+    # nfr-стратегия появляется с НФТ-требованием
+    r = client.post(f"/api/services/{sid}/requirements", headers=A,
+                    json={"req_type": "nonfunc", "text": "p95 < 200 мс", "ext_id": "НФТ-1"})
+    assert r.status_code == 200, r.text
+    assert _fix_strategy(sid, "nfr_security") == "nfr"
+    r = client.post(f"/api/services/{sid}/ai-review/fix", headers=A,
+                    json={"artifact_kind": "nfr_security", "title": "NFR-цели не выражены в цифрах"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["strategy"] == "nfr" and "НФТ-1" in d["after"]["content_md"]
+
+
 def test_standard_context_and_std_ref():
     """Промпт ревьюера обогащается разделами корпоративного стандарта (KB, Confluence DA);
     ссылка на пункт стандарта (std) нормализуется."""
