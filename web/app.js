@@ -565,19 +565,22 @@ function tabReview(s){
   $('#tabbody').innerHTML = `
   <div class="card vio" style="margin-bottom:14px"><h2 style="margin-top:0">Готовность к ревью</h2>
     <div id="svc-readiness"><p class="small mut">Считаю по данным сервиса…</p></div>
-    <p class="small mut" style="margin-top:10px">draft → in_review → approved / changes_requested.
-    Готовность вычисляется автоматически из артефактов, хранящихся в DeepArch; при отправке
-    система сама фиксирует проверку (история сохраняется). Решение — за ревьюером (BR-33).</p>
+    <p class="small mut" style="margin:6px 0 10px">Гейт — формальная полнота артефактов; AI-ревью —
+    содержательные риски и несоответствия. Advisory (BR-33): находки не блокируют отправку —
+    решение за автором и ревьюером.</p>
     <div class="btnrow">
       ${s.review_status==='in_review'
         ? `<span class="chip">Ревью идёт · запрошено <b>${esc(open?.requested_by||'')}</b></span>`
         : `<button id="btn-send-review" onclick="requestReview(${s.id})" ${canSend?'':'disabled'}>Отправить на ревью</button>
+           <button class="sec" id="btn-ai-review" onclick="aiReview(${s.id})" ${canSend?'':'disabled'}
+             title="Предварительное AI-ревью пакета до отправки (advisory, BR-33)">🧠 AI-ревью</button>
            ${canSend?'':'<span class="small mut">Отправка на ревью: владелец/архитектор или product-группа</span>'}`}
       ${canDecide?`
         <button class="btn-ok" onclick="decide(${open.id},'approved')">✓ Approved</button>
         <button class="btn-bad" onclick="decide(${open.id},'changes_requested')">✗ Changes requested</button>`:''}
     </div>
     ${canDecide?`<textarea class="sm" id="rv-comment" placeholder="Комментарий решения (необязательно)"></textarea>`:''}
+    <div id="svc-aireview" style="margin-top:12px"></div>
   </div>
   <div class="card"><table><tr><th>#</th><th>Запрошено</th><th>Ревьюер</th><th>Решение</th><th>Комментарий</th></tr>
   ${s.reviews.map(r=>`<tr><td>${r.id}</td>
@@ -585,6 +588,7 @@ function tabReview(s){
     <td>${esc(r.reviewer||'—')}</td><td>${statusB(r.status)}</td><td class="small mut">${esc(r.comment||'')}</td></tr>`).join('')||'<tr><td colspan=5 class="mut">Ревью ещё не было</td></tr>'}
   </table></div>`;
   svcReadiness(s.id);
+  svcAiReviewLoad(s.id);
 }
 /* Живой ответ на «всё ли у меня есть перед отправкой на ревью?» — расчёт бэкенда по данным DeepArch */
 async function svcReadiness(sid){
@@ -601,18 +605,114 @@ async function svcReadiness(sid){
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 10px">
         <span class="badge ${r.ready?'b-approved':'b-draft'}" style="font-size:13px">
           ${r.ready?'✓ Готов к отправке на ревью':'✗ Не готов: не закрыто обязательных — '+missing.length}</span>
-        <span class="small mut">предварительная готовность ${r.score_pct}%</span>
-        ${r.last_run?`<span class="small mut">· последняя фиксация: ${new Date(r.last_run.created_at*1000).toLocaleDateString('ru')} — ${r.last_run.score_pct}% (${esc(r.last_run.created_by||'')})</span>`:''}
+        <span id="ai-verdict"></span>
+        <span class="small mut">текущая готовность ${r.score_pct}%</span>
+        ${r.last_run?`<span class="small mut">фиксация при последней отправке: ${new Date(r.last_run.created_at*1000).toLocaleDateString('ru')} — ${r.last_run.score_pct}% (${esc(r.last_run.created_by||'')})</span>`:''}
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap">${r.items.map(chip).join('')}</div>
       ${r.ready ? '' : `<p class="small" style="margin:10px 0 0">Отправка заблокируется на: <b>${r.blockers.map(esc).join('; ')}</b> — заполните соответствующие артефакты.</p>`}
       ${approved?`<p class="small" style="margin:10px 0 0">Сервис уже approved — повторная отправка перезапустит процесс ревью.</p>`:''}`;
+    paintAiVerdict();     // слот уже в DOM: закрашиваем вердикт AI (устраняет гонку двух async-рендеров)
     const btn = document.getElementById('btn-send-review');
     if(btn && !r.ready){
       btn.disabled = true;
       btn.title = 'Не закрыто обязательных пунктов: ' + r.blockers.join('; ');
     }
   }catch(e){ el.innerHTML = `<p class="small mut">Готовность недоступна: ${esc(e.message)}</p>`; }
+}
+/* ---------- AI-ревью до отправки (advisory, BR-33) ---------- */
+let AI_LAST = null;      // последний прогон для текущего сервиса (кэш вердикта между async-рендерами)
+const AI_KIND = {противоречие:'Противоречие', риск:'Риск', пробел:'Не хватает', несоответствие:'Расхождение'};
+function paintAiVerdict(){
+  /* Вердикт AI-ревью живёт в строке рядом с гейтом готовности — один сводный статус */
+  const slot = document.getElementById('ai-verdict'); if(!slot) return;
+  if(!AI_LAST){
+    slot.innerHTML = `<span class="chip" style="background:var(--surface2);color:#52525b">🧠 AI-ревью: ещё не проводилось</span>`;
+    return;
+  }
+  const warn = AI_LAST.findings.filter(f=>f.severity==='warning').length;
+  slot.innerHTML = `<span class="chip" style="background:#eef2ff;color:#4338ca">🧠 AI-ревью: ${warn?`⚠ серьёзных — ${warn}`:'✓ серьёзных нет'} из ${AI_LAST.findings.length}</span>`;
+}
+function aiGroupFindings(fs){
+  /* Однотипные формальные находки («нет ссылки на исходник» ×7) схлопываем в одну раскрываемую */
+  const groups = [];
+  const key = f => `${f.layer}|${f.kind}|${f.severity}|${(f.detail||'').replace(/«[^»]+»/g,'«…»')}`;
+  const map = {};
+  for(const f of fs){
+    const k = key(f);
+    if(map[k] && f.layer==='formal') map[k].items.push(f);
+    else { const g = {lead:f, items:[f]}; map[k]=g; groups.push(g); }
+  }
+  return groups;
+}
+function aiSection(title, cls, findings){
+  if(!findings.length) return '';
+  const card = f => {
+    const kind = esc(AI_KIND[f.kind] || f.kind);
+    const art = esc(f.artifact || f.artifact_kind || '');
+    const aiTag = f.layer==='llm' ? ` <span class="aireview-ai">AI-анализ</span>` : '';
+    const inner = `<b>${kind}${art?` · ${art}`:''}: ${esc(f.title)}</b>${aiTag}
+      ${f.detail?`<div class="small">${esc(f.detail)}</div>`:''}
+      ${f.evidence?`<div class="small mut">Доказательство: ${esc(f.evidence)}</div>`:''}`;
+    const cls2 = `aireview-item${f.severity==='warning'?' aireview-warn':''}`;
+    return f.target
+      ? `<a class="${cls2} lnk" href="${esc(f.target)}">${inner}</a>`
+      : `<div class="${cls2}">${inner}</div>`;
+  };
+  const groupCard = g => g.items.length === 1 ? card(g.lead) : (() => {
+    const lead = g.lead;
+    const generic = lead.title.replace(/«[^»]+»/g, '«…»');
+    const list = g.items.map(f => f.artifact || f.artifact_kind
+      ? `<li><a class="lnk" href="${esc(f.target||'#')}">${esc(f.artifact || f.artifact_kind)}</a></li>`
+      : '').join('');
+    return `<details class="aireview-item${lead.severity==='warning'?' aireview-warn':''}">
+      <summary><b>${esc(AI_KIND[lead.kind]||lead.kind)}: ${esc(generic)}</b> <span class="mut">· ${g.items.length} артефактов</span></summary>
+      ${lead.detail?`<div class="small" style="margin-top:4px">${esc(lead.detail)}</div>`:''}
+      <ul class="small" style="margin:6px 0 0">${list}</ul></details>`;
+  })();
+  return `<div class="aireview-sec"><div class="aireview-h ${cls}">${title}</div>${aiGroupFindings(findings).map(groupCard).join('')}</div>`;
+}
+function renderAiReview(el, r){
+  if(!r){
+    el.innerHTML = `<p class="small mut">🧠 AI-ревью ещё не проводилось — запустите перед отправкой,
+      чтобы поймать замечания заранее и не получить changes_requested с первого раза.</p>`;
+    return;
+  }
+  const warn = r.findings.filter(f=>f.severity==='warning');
+  const info = r.findings.filter(f=>f.severity!=='warning');
+  const dyn = r.previous ? ` · прошлый прогон: ${r.previous.total} → ${r.findings.length} находок` : '';
+  el.innerHTML = `
+    ${r.note?`<p class="small mut" style="margin:0 0 8px">${esc(r.note)}</p>`:''}
+    ${aiSection(`⚠ Серьёзные — ${warn.length}`, 'aireview-h-warn', warn)}
+    ${aiSection(`ℹ️ Замечания — ${info.length}`, 'aireview-h-info', info)}
+    ${r.findings.length ? '' : '<p class="small" style="margin:0 0 6px">Находок нет — формальные проверки и AI-анализ чистые.</p>'}
+    <p class="small mut" style="margin:8px 0 0">Прогон ${new Date(r.created_at*1000).toLocaleString('ru')} · ${esc(r.created_by||'')}${dyn}.
+    Advisory (BR-33): находки — рекомендации, отправку не блокируют.</p>`;
+}
+async function svcAiReviewLoad(sid){
+  AI_LAST = null; paintAiVerdict();       // чужой вердикт не переживает смену сервиса
+  const el = document.getElementById('svc-aireview'); if(!el) return;
+  try{
+    const r = await api(`/services/${sid}/ai-review`);
+    if(!el.isConnected) return;
+    AI_LAST = r; paintAiVerdict();
+    renderAiReview(el, r);            // null — ещё не проводилось: показываем подсказку
+  }catch(e){ el.innerHTML = `<p class="small mut">AI-ревью недоступно: ${esc(e.message)}</p>`; }
+}
+async function aiReview(sid){
+  const btn = document.getElementById('btn-ai-review');
+  const el = document.getElementById('svc-aireview');   // до await: вкладка могла смениться за время LLM (~30 с)
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ AI-ревью…'; }
+  try{
+    const r = await api(`/services/${sid}/ai-review`, {method:'POST', body:'{}'});
+    if(!el || !el.isConnected) return;   // ответ устаревшего прогона не рендерим
+    AI_LAST = r; paintAiVerdict();
+    renderAiReview(el, r);
+    const warn = r.findings.filter(f=>f.severity==='warning').length;
+    toast(warn ? `AI-ревью: серьёзных находок — <b>${warn}</b> (см. список ниже)`
+               : 'AI-ревью: серьёзных находок нет');
+  }catch(e){ toast(esc(e.message), true); }
+  if(btn){ btn.disabled = false; btn.textContent = '🧠 AI-ревью'; }
 }
 async function requestReview(sid){
   if(SERVICE && SERVICE.id===sid && SERVICE.review_status==='approved'

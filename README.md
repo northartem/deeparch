@@ -37,7 +37,7 @@ uv run uvicorn app.main:app --port 8731
 | Workflow ревью | BR-04/05 | draft → in_review → approved / changes_requested; gate: self-check без блокеров; решение только у domain_expert |
 | Каталог переиспользуемых компонентов | BR-14…19 | билдинг-блоки со статусами proposed/approved/deprecated, связь со стандартом/ADR, использование, compliance by construction |
 | Интеграция с каталогом/CMDB | BR-20…23 | адаптер `CatalogAdapter`: mock Backstage (import/export catalog-info.yaml), слот для DataGerry (REST) |
-| AI-ускорение | BR-27…37 | адаптер AI (mock → AI-Buddy): AI-черновики артефактов, AI Gate предсказание self-check с evidence, advisory-режим, human-in-the-loop |
+| AI-ускорение | BR-27…37 | адаптер AI (mock → AI-Buddy): AI-черновики артефактов, AI-ревью пакета до отправки (двухслойное: формальные проверки + LLM-проход, advisory), human-in-the-loop |
 | Модуль техдолга | BR-38…40 | реестр AD/TD по стандарту DA (Confluence pageId=915912594, 918365931, 907535137): ID `{AD\|TD}-{ГГГГ}-{ММ}-{NNN}`, риск = вероятность × ущерб (Ds), P0–P3, статусы Новый→Погашен, владелец, стоимость, план погашения |
 | Дашборд и аудит | — | покрытие, статусы ревью, использование компонентов, журнал действий |
 
@@ -86,7 +86,10 @@ POST /api/services/{id}/reviews          → на ревью (gate по self-che
 POST /api/reviews/{id}/decision          → approved | changes_requested (expert+)
 GET/POST /api/components                 → каталог компонентов
 POST /api/services/{id}/components       → подключить компонент
-POST /api/ai/draft | /api/ai/precheck    → AI-черновик (AI-Buddy + KB, fallback шаблон) / AI Gate (advisory)
+POST /api/ai/draft                        → AI-черновик (AI-Buddy + KB, fallback шаблон)
+POST /api/services/{id}/ai-review         → AI-ревью пакета до отправки (формальный слой + LLM, advisory)
+GET  /api/services/{id}/ai-review         → последний прогон AI-ревью (null, если не было)
+POST /api/ai/precheck                     → 410: AI Gate упразднён, поглощён AI-ревью
 POST /api/services/{sid}/artifacts/scaffold → скелеты обязательных артефактов (которых ещё нет)
 GET/POST /api/services/{sid}/requirements   → реестр ФТ/НФТ на сервисе (трассировка covered_by)
 POST /api/services/{sid}/requirements/parse → AI-разбор вставленного документа на требования
@@ -118,7 +121,9 @@ GET  /api/dashboard | /api/audit
 
 ## Дорожная карта (следующие шаги)
 
-1. **AI-Buddy для остальных AI-сценариев** — AI-черновики и разбор требований уже ходят в корпоративную LLM (`app/ai.py`, `app/reqs.py` → `app/llm.py`, `reasoning_effort=low`); AI Gate (BR-29) пока на mock-эвристиках за тем же контрактом.
+1. **AI-Buddy для остальных AI-сценариев** — AI-черновики, разбор требований и AI-ревью пакета
+   (`app/ai_review.py`) уже ходят в корпоративную LLM (`app/ai.py`, `app/reqs.py` → `app/llm.py`,
+   `reasoning_effort=low`).
 2. **Real Confluence API** — прямая запись XHTML на страницу реестра долга (сейчас — копипаста через UI).
 3. **Backstage-коннектор** — реальный `catalog-info.yaml` из GitLab вместо mock.
 4. **DataGerry-коннектор** — ObjectTypes + матрица доступов (контур ИБ).

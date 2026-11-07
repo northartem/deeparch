@@ -391,3 +391,24 @@ button.art-idx{cursor:pointer;font-family:inherit;color:var(--txt);font-weight:5
 button.art-idx:hover{background:var(--surface2)}
 /* readonly-поля (Vision-исходник) визуально отличаются от редактируемых (ревью 2026-11-07) */
 textarea[readonly]{background:var(--surface2)}
+
+/* AI-ревью до отправки: кликабельные находки (advisory, BR-33) */
+.aireview-item{display:block;padding:9px 12px;border:1px solid var(--line);border-left-width:3px;
+  border-radius:8px;margin:6px 0;color:var(--txt);text-decoration:none}
+.aireview-item:hover{background:var(--surface2)}
+.aireview-item.lnk{color:var(--txt)}
+.aireview-warn{border-left-color:var(--warn)}
+details.aireview-item{padding:0}
+details.aireview-item summary{padding:9px 12px;cursor:pointer;list-style:none}
+details.aireview-item summary::-webkit-details-marker{display:none}
+details.aireview-item summary::before{content:'▸';display:inline-block;margin-right:6px;color:var(--faint);
+  transition:transform .12s}
+details.aireview-item[open] summary::before{transform:rotate(90deg)}
+details.aireview-item > *:not(summary){padding:0 12px 9px}
+.aireview-sec{margin:10px 0}
+.aireview-h{font-size:13px;font-weight:600;color:var(--faint);text-transform:uppercase;
+  letter-spacing:.04em;margin:0 0 4px}
+.aireview-h-warn{color:var(--warn)}
+.aireview-h-info{color:#4b5563}
+.aireview-ai{display:inline-block;font-size:11px;font-weight:600;color:#4338ca;background:#eef2ff;
+  border-radius:6px;padding:1px 7px;margin-left:6px;vertical-align:1px}
