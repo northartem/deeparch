@@ -433,7 +433,7 @@ function mdDoc(src){
   /* Рендер markdown пакета для чтения: escape-first, затем структурные блоки —
      код-фенсы, заголовки, GFM-таблицы, списки, абзацы, ссылки (только http/https/#).
      Без внешних зависимостей (расширение идеологии mdLite из чата). */
-  const lines = esc(src || '').split('\n');
+  const lines = esc((src || '').replace(/<!--[\s\S]*?-->/g, '')).split('\n');
   const inline = t => t
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
