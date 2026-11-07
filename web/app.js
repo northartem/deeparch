@@ -273,6 +273,7 @@ async function createService(){
 const ARTIFACT_TAB = () => ['artifacts','Артефакты' + (S.standard ? ` (${S.standard.artifacts.length})` : '')]; // число видов артефактов — из стандарта, не хардкод
 const TABS = [['card','Карточка'],ARTIFACT_TAB(),['review','Ревью'],['components','Компоненты']]; // базовый список (полный собирается в viewService)
 let SERVICE = null;
+let _VS_GEN = 0;                    // защита от гонки: у каждого вызова viewService свой номер
 async function viewService(id, tab='card'){
   if(tab === 'check'){                          // self-check интегрирован в «Ревью» — старые ссылки работают
     location.hash = `#/service/${id}/review`; return;
@@ -280,7 +281,10 @@ async function viewService(id, tab='card'){
   if(tab === 'diagrams'){                       // «Диаграммы» слиты в «Проектирование» — старые ссылки работают
     location.hash = `#/service/${id}/design`; return;
   }
-  const s = await api('/services/'+id); SERVICE = s;
+  const gen = ++_VS_GEN;
+  const s = await api('/services/'+id);
+  if(gen !== _VS_GEN) return;       // пока летел запрос, навигация ушла дальше — рендер устарел
+  SERVICE = s;
   const active = tab||'card';
   const tabs = [['card','Карточка'],
     ['reqs', 'Требования' + (s.requirements?.length ? ` (${s.requirements.length})` : '')],
@@ -443,7 +447,7 @@ function tabArtifacts(s){
         const f = _artFilled(byKind[a.kind]);
         const mand = s.mandatory_artifacts.includes(a.kind);
         const st = f ? '<span style="color:#047857">✓</span>'
-          : mand ? '<span style="color:#e11d48">✗</span>' : '<span style="color:var(--mut)">○</span>';
+          : mand ? '<span style="color:#be123c">✗</span>' : '<span style="color:#52525b">○</span>';
         return `<button class="chip art-idx" onclick="artJump('${a.kind}')" title="Перейти к артефакту">${st} ${esc(a.title)}</button>`;
       }).join('')}
     </div>
@@ -461,7 +465,7 @@ function tabArtifacts(s){
     <summary>
       <b>${esc(a.title)}</b> ${mandatory?'<span class="badge b-mandatory">обязательный для типа</span>':''}
       ${f?'<span class="chip" style="background:#ecfdf5;color:#047857">✓ заполнен</span>'
-        :`<span class="chip" style="background:${mandatory?'#fff1f2;color:#e11d48':'var(--surface2);color:var(--mut)'}">${mandatory?'✗ пуст · блокер готовности':'○ пуст'}</span>`}
+        :`<span class="chip" style="background:${mandatory?'#fff1f2;color:#be123c':'var(--surface2);color:#52525b'}">${mandatory?'✗ пуст · блокер готовности':'○ пуст'}</span>`}
       <span class="small mut" style="margin-left:auto">v${cur.version||1} · ${cur.updated_by?esc(cur.updated_by):'—'}</span>
     </summary>
     <div class="small mut" style="margin:8px 0 0">${esc(a.question)}</div>
@@ -589,7 +593,7 @@ async function svcReadiness(sid){
     const r = await api(`/services/${sid}/readiness`);
     const chip = i => i.grade === 'E'
       ? `<span class="chip" style="background:#ecfdf5;color:#047857">✓ <a class="lnk" style="color:inherit" href="${i.link}">${esc(i.item)}</a></span>`
-      : `<span class="chip" style="background:${i.blocking?'#fff1f2;color:#e11d48':'var(--surface2);color:var(--mut)'}">
+      : `<span class="chip" style="background:${i.blocking?'#fff1f2;color:#be123c':'var(--surface2);color:#52525b'}">
          ${i.blocking?'✗':'○'} <a class="lnk" style="color:inherit" href="${i.link}">${esc(i.item)}</a>${i.blocking?' · блокер':i.matrix==='desired'?' · желательный':' · не обязателен'}</span>`;
     const missing = r.items.filter(i => i.blocking);
     const approved = SERVICE && SERVICE.review_status==='approved';
