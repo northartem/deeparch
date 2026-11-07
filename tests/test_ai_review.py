@@ -121,3 +121,22 @@ def test_parse_findings_json_salvage():
     assert r and [f["title"] for f in r["findings"]] == ["A"]
     # мусор без JSON
     assert parse("никакого json здесь нет") is None
+
+
+def test_standard_context_and_std_ref():
+    """Промпт ревьюера обогащается разделами корпоративного стандарта (KB, Confluence DA);
+    ссылка на пункт стандарта (std) нормализуется."""
+    from app.ai_review import _normalize_llm_findings, _standard_context
+    # KB-дайджест методологии ревью доступен без сети (статичный kb_data)
+    ctx = _standard_context(1)
+    assert ctx and "стандарт" in ctx.lower()
+    assert "913353852" in repr(ctx) or "методолог" in ctx.lower() or "FR-" in ctx
+    # std из ответа LLM: нормализация
+    fs = _normalize_llm_findings({"findings": [
+        {"kind": "несоответствие", "severity": "warning", "std": "  FR-14.2 ",
+         "title": "ADR-002 противоречит Deployment", "detail": "d"},
+        {"kind": "риск", "title": "нет std", "detail": "d"},
+        {"kind": "риск", "title": "пустой std", "std": "   ", "detail": "d"},
+    ]})
+    assert fs[0]["std"] == "FR-14.2"
+    assert fs[1]["std"] is None and fs[2]["std"] is None

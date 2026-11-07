@@ -17,6 +17,7 @@ import re
 from . import c4 as c4mod
 from . import llm, nfr, reqs
 from .db import exec, now, q, q1
+from .kb import retrieve as retrieve_kb
 from .standards import ARTIFACT_KINDS, PROJECT_TYPES
 
 _TITLES = {a["kind"]: a["title"] for a in ARTIFACT_KINDS}
@@ -27,6 +28,7 @@ REVIEW_SYSTEM = """Ты опытный архитектурный ревьюер
 {"findings": [{"kind": "противоречие" | "риск" | "пробел" | "несоответствие",
                "artifact_kind": "vision_c4|adr|deployment|api|data_model|nfr_security|config_build|threat_model|drp_bcp или null",
                "severity": "warning" | "info",
+               "std": "пункт стандарта, которому противоречит находка (например \"FR-3.3\", \"FR-6.1\", \"FR-14.2\"), или null",
                "title": "краткий заголовок находки",
                "detail": "что не так и почему это заметит ревьюер (1-3 предложения)",
                "evidence": "цитата или факт из пакета, на котором основана находка"}]}
@@ -34,24 +36,38 @@ REVIEW_SYSTEM = """Ты опытный архитектурный ревьюер
 1. Опирайся только на предоставленные данные; не выдумывай артефакты, требования и факты.
 2. Ищи содержательные проблемы: противоречия между артефактами, незакрытые требования,
    NFR без цифр, расхождения C4-модели и текста, пробелы в Security/DRP.
-3. Не дублируй формальные проверки — пустые и необязательные артефакты уже проверены системой.
-4. Максимум 6 находок, самые важные сначала; содержательных находок может не быть — пустой массив.
-5. Пиши компактно: title до 80 символов, detail до 2 предложений, evidence — одна цитата.
-6. Только JSON без markdown-ограждений и пояснений. Все тексты — по-русски.
-7. Находки advisory (BR-33): ты помогаешь автору, решение всегда за человеком."""
+3. Сверяй пакет с приведёнными разделами корпоративного стандарта (Architecture Definition Set
+   и методология ревью): обязательные ADR-001…005 и их структура (Контекст, Альтернативы,
+   Решение, Обоснование, Последствия); согласованность документов (FR-14.2: NFR Vision ↔
+   NFR Baseline, ADR-002 ↔ Deployment, ADR-003 ↔ модель данных, ADR-004 ↔ security);
+   полнота NFR Baseline (FR-6.1); соответствие качества типу проекта (FR-14.3, целевые
+   диапазоны FR-10). В std указывай конкретный пункт стандарта.
+4. Не дублируй формальные проверки — пустые и необязательные артефакты уже проверены системой.
+5. Максимум 6 находок, самые важные сначала; содержательных находок может не быть — пустой массив.
+6. Пиши компактно: title до 80 символов, detail до 2 предложений, evidence — одна цитата.
+7. Только JSON без markdown-ограждений и пояснений. Все тексты — по-русски.
+8. Находки advisory (BR-33): ты помогаешь автору, решение всегда за человеком."""
 
 
 def _f(severity, kind, title, detail="", target=None, artifact_kind=None,
-       evidence=None, layer="formal"):
+       evidence=None, layer="formal", std=None):
     return {"severity": severity, "layer": layer, "kind": kind,
             "artifact_kind": artifact_kind,
             "artifact": _TITLES.get(artifact_kind),   # русское название для UI
+            "std": std,                               # пункт стандарта (FR-x.y) — только LLM-слой
             "title": title, "detail": detail,
             "evidence": evidence, "target": target}
 
 
 def _tgt(sid, tab):
     return f"#/service/{sid}/{tab}"
+
+
+def _std_ref(raw) -> str | None:
+    """Пункт стандарта из ответа LLM: короткая ссылка вида «FR-3.3» / «FR-14.2» (≤80)."""
+    if not isinstance(raw, str):
+        return None
+    return raw.strip()[:80] or None
 
 
 def _filled(a) -> bool:
@@ -213,8 +229,31 @@ def _normalize_llm_findings(raw) -> list[dict]:
             None,
             it.get("artifact_kind") if it.get("artifact_kind") in _TITLES else None,
             (it.get("evidence") or "").strip()[:400] or None,
-            layer="llm"))
+            layer="llm",
+            std=_std_ref(it.get("std"))))
     return out
+
+
+def _standard_context(service_id: int) -> str:
+    """Разделы корпоративного стандарта (KB, Confluence DA) релевантные пакету сервиса.
+
+    Запрос собирается из заполненных видов артефактов — ревьюер сверяет находки
+    с конкретными пунктами стандарта (FR-*), а не с общими представлениями.
+    Пустая строка, если KB нечего предложить (нет релевантного).
+    """
+    filled = [a["kind"] for a in q("SELECT kind, content_md, diagram_code FROM artifacts "
+                                   "WHERE service_id=?", (service_id,))
+              if (a["content_md"] or "").strip() or (a["diagram_code"] or "").strip()]
+    svc = q1("SELECT project_type, domain FROM services WHERE id=?", (service_id,))
+    terms = ["стандарт", "ревью", "архитектурные артефакты", *filled]
+    if svc:
+        terms.append(svc["project_type"] or "")
+        terms.append(svc["domain"] or "")
+    hits = retrieve_kb(" ".join(t for t in terms if t), k=4)
+    if not hits:
+        return ""
+    return "\n\n".join(
+        f"[{n}] {c['title']}:\n{c['chunk'][:900]}" for n, c in enumerate(hits, 1))
 
 
 def llm_findings(service_id: int, model: str = "") -> dict:
@@ -222,8 +261,12 @@ def llm_findings(service_id: int, model: str = "") -> dict:
     if not llm.configured():
         return {"provider": "none", "model": None, "findings": [],
                 "note": "LLM не подключена — выполнены только формальные проверки"}
+    std_ctx = _standard_context(service_id)
+    std_block = (f"\n\nРазделы корпоративного стандарта для сверки (Confluence DA):\n\n{std_ctx}"
+                 if std_ctx else "")
     prompt = (f"Архитектурный пакет сервиса для предварительного ревью:\n\n"
-              f"{_review_context(service_id)}\n\n"
+              f"{_review_context(service_id)}"
+              f"{std_block}\n\n"
               f"Проведи ревью и верни JSON с находками.")
     try:
         raw = llm.chat([{"role": "system", "content": REVIEW_SYSTEM},

@@ -651,7 +651,8 @@ function aiSection(title, cls, findings){
     const kind = esc(AI_KIND[f.kind] || f.kind);
     const art = esc(f.artifact || f.artifact_kind || '');
     const aiTag = f.layer==='llm' ? ` <span class="aireview-ai">AI-анализ</span>` : '';
-    const inner = `<b>${kind}${art?` · ${art}`:''}: ${esc(f.title)}</b>${aiTag}
+    const stdTag = f.std ? ` <span class="aireview-std" title="Пункт корпоративного стандарта">📖 ${esc(f.std)}</span>` : '';
+    const inner = `<b>${kind}${art?` · ${art}`:''}: ${esc(f.title)}</b>${aiTag}${stdTag}
       ${f.detail?`<div class="small">${esc(f.detail)}</div>`:''}
       ${f.evidence?`<div class="small mut">Доказательство: ${esc(f.evidence)}</div>`:''}`;
     const cls2 = `aireview-item${f.severity==='warning'?' aireview-warn':''}`;
