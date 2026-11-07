@@ -506,10 +506,21 @@ async function saveArt(sid, kind){
   const body = {content_md:$(`#a-${kind}`).value, source_url:$(`#u-${kind}`).value};
   if(dEl && !dEl.readOnly) body.diagram_code = dEl.value;   // vision_c4 — производная редактора; у остальных поле отсутствует
   await api(`/services/${sid}/artifacts/${kind}`, {method:'PUT', body: JSON.stringify(body)});
-  toast('Артефакт сохранён, версия поднята'); viewService(sid,'artifacts');
+  toast('Артефакт сохранён, версия поднята');
+  // после перерисовки карточка заполненного артефакта свернётся по умолчанию —
+  // возвращаем пользователя к сохранённой карточке, а не к стене/индексу
+  ART_JUMP = kind;
+  viewService(sid,'artifacts');
 }
 async function aiDraft(sid, kind, btn){
   const old = btn ? btn.textContent : '';
+  // перезапись несохранённой диаграммы — с подтверждением (ревью 2026-11-07)
+  const dEl = document.getElementById('d-'+kind);
+  if(dEl && !dEl.readOnly && dEl.value.trim() &&
+     !confirm('Текущая (несохранённая) диаграмма будет заменена AI-черновиком. Продолжить?')){
+    if(btn){ btn.disabled = false; btn.textContent = old; }
+    return;
+  }
   if(btn){ btn.disabled = true; btn.textContent = '✨ Генерирую…'; }
   try{
     const r = await api('/ai/draft', {method:'POST', body: JSON.stringify({

@@ -38,11 +38,10 @@ def test_llm_path_accepts_valid_and_falls_back_on_garbage(client, auth, monkeypa
     sid = client.post("/api/services", headers=A, json={"code": "AILL", "name": "LLM path",
                                                         "project_type": "mvp"}).json()["id"]
     good = "```mermaid\nerDiagram\n  ORDER ||--o{ ITEM : contains\n```"   # с ограждениями — срежутся
-    calls = []
 
     def chat(messages, **kw):
-        calls.append(messages[0]["content"][:20])
-        return good if len(calls) == 1 else "# черновик контента"   # 1-й вызов — диаграмма
+        # вызовы параллельные — маршрут по system-промпту, а не по порядку
+        return good if "Mermaid" in messages[0]["content"] else "# черновик контента"
 
     r = _draft(client, A, sid, "data_model", monkeypatch, configured=True, chat=chat)
     assert r["diagram_code"] == "erDiagram\n  ORDER ||--o{ ITEM : contains"

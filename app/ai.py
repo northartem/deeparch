@@ -8,6 +8,7 @@ MVP: provider="mock" — детерминированные эвристики �
 """
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from . import llm, reqs
 from .db import q, q1
@@ -196,14 +197,15 @@ def draft_diagram(service_id: int, kind: str, model: str = "", svc=None) -> str 
 
 def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
     """AI-черновик артефакта (BR-28): живой AI-Buddy по контексту сервиса и KB стандарта,
-    при недоступности LLM — детерминированный шаблон (fallback)."""
+    при недоступности LLM — детерминированный шаблон (fallback).
+    Текст и диаграмма генерируются параллельно (два вызова LLM ~30 с вместо ~60 с последовательно)."""
     svc = q1("SELECT * FROM services WHERE id=?", (service_id,))
     art = next((a for a in ARTIFACT_KINDS if a["kind"] == kind), None)
     if not svc or not art:
         return None
-    diag = draft_diagram(service_id, kind, model=model, svc=svc)   # None — у вида нет диаграммы
     body = _mock_draft(svc, kind, art)
     if not llm.configured():
+        diag = draft_diagram(service_id, kind, model=model, svc=svc)
         return {"service_id": service_id, "kind": kind, "provider": "mock", "model": None,
                 "content_md": body, **({"diagram_code": diag} if diag else {}),
                 "note": "Черновик по шаблону стандарта (LLM не подключена) — требует подтверждения автора (BR-28/BR-33)"}
@@ -221,9 +223,15 @@ def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
                    f"Факты о сервисе:\n{_service_facts(service_id)}\n\n"
                    f"Составь черновик артефакта «{art['title']}» для сервиса {svc['code']}.")
     try:
-        text = llm.chat([{"role": "system", "content": DRAFT_SYSTEM},
-                         {"role": "user", "content": user_prompt}],
-                        temperature=0.3, max_tokens=4000, model=model)
+        diag = None
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            f_diag = ex.submit(draft_diagram, service_id, kind, model)   # internal LLMError → skeleton
+            f_text = ex.submit(llm.chat,
+                               [{"role": "system", "content": DRAFT_SYSTEM},
+                                {"role": "user", "content": user_prompt}],
+                               temperature=0.3, max_tokens=4000, model=model)
+            text = f_text.result()
+            diag = f_diag.result()
         if not text.strip():
             raise llm.LLMError("LLM вернула пустой ответ")
         return {"service_id": service_id, "kind": kind, "provider": "ai-buddy",

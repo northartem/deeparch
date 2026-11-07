@@ -388,3 +388,5 @@ details.art-card[open]>summary::before{content:'▾'}
 details.art-card>summary .chip{margin:0}
 button.art-idx{cursor:pointer;font-family:inherit;color:var(--txt);font-weight:500;background:var(--surface)}
 button.art-idx:hover{background:var(--surface2)}
+/* readonly-поля (Vision-исходник) визуально отличаются от редактируемых (ревью 2026-11-07) */
+textarea[readonly]{background:var(--surface2)}
