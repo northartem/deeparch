@@ -59,5 +59,16 @@ def can_edit_service(user, svc) -> bool:
     return service_scope(user, svc) in ("full", "team")
 
 
+def my_service_ids(user) -> list[int]:
+    """Сервисы пользователя: владелец/архитектор по карточке ИЛИ product-группа с грантом."""
+    rows = q("SELECT id FROM services WHERE owner=? OR architect=?",
+             (user["username"], user["username"]))
+    ids = [r["id"] for r in rows]
+    for g in user_groups(user["username"]):
+        if g["kind"] == "product":
+            ids += [s for s in group_services(g["id"]) if s not in ids]
+    return ids
+
+
 def in_committee(username: str) -> bool:
     return any(g["kind"] == "committee" for g in user_groups(username))

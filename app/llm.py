@@ -74,7 +74,9 @@ def masked_token() -> str:
 
 
 class LLMError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code   # HTTP-код, если ошибка от статуса ответа (для _tools_unsupported)
 
 
 def list_models(url: str = "", token: str = "") -> dict:
@@ -129,7 +131,61 @@ def chat(messages: list[dict], temperature: float = 0.2, max_tokens: int = 2500,
         # reasoning-модели могут вернуть content=None (весь бюджет ушёл в рассуждения)
         return data["choices"][0]["message"].get("content") or ""
     except httpx.HTTPStatusError as e:
-        raise LLMError(f"HTTP {e.response.status_code}: {e.response.text[:200]}") from e
+        raise LLMError(f"HTTP {e.response.status_code}: {e.response.text[:200]}",
+                       status_code=e.response.status_code) from e
+    except httpx.HTTPError as e:
+        raise LLMError(f"AI-Buddy недоступен: {e.__class__.__name__}") from e
+    except (KeyError, IndexError, ValueError) as e:
+        raise LLMError(f"Неожиданный формат ответа AI-Buddy: {e}") from e
+
+
+def _payload(messages: list[dict], temperature: float, max_tokens: int, model: str,
+             tools: list | None = None, stream: bool = False) -> dict:
+    body = {"model": model, "messages": messages, "temperature": temperature,
+            "max_tokens": max_tokens, "reasoning_effort": "low"}
+    if tools:
+        body["tools"] = tools
+    if stream:
+        body["stream"] = True
+    return body
+
+
+def chat_tools(messages: list[dict], tools: list[dict], temperature: float = 0.2,
+               max_tokens: int = 2500, model: str = "") -> dict:
+    """Вызов chat/completions с tools (OpenAI function calling).
+
+    Возвращает нормализованное сообщение ассистента:
+      {"content": str}                                  — финальный ответ, или
+      {"content": str, "tool_calls": [{id,name,arguments}]} — запрос вызова инструментов.
+    arguments — сырая JSON-строка от модели (может быть невалидной, парсит вызывающий).
+    Бросает LLMError при ошибке, в т.ч. если прокси/модель не поддерживают tools.
+    """
+    url, token, def_model = config()
+    if not (url and token):
+        raise LLMError("AI-Buddy не сконфигурирован (админ-панель → Интеграции)")
+    model = (model or "").strip() or def_model
+    try:
+        r = httpx.post(
+            f"{url}/chat/completions",
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"},
+            json=_payload(messages, temperature, max_tokens, model, tools=tools),
+            timeout=TIMEOUT)
+        r.raise_for_status()
+        msg = r.json()["choices"][0]["message"]
+        calls = []
+        for i, tc in enumerate(msg.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            args = fn.get("arguments")
+            # некоторые шлюзы отдают arguments уже объектом — нормализуем в строку
+            if isinstance(args, dict):
+                args = json.dumps(args, ensure_ascii=False)
+            calls.append({"id": tc.get("id") or f"call_{i}",
+                          "name": fn.get("name") or "", "arguments": args or "{}"})
+        return {"content": msg.get("content") or "", "tool_calls": calls}
+    except httpx.HTTPStatusError as e:
+        raise LLMError(f"HTTP {e.response.status_code}: {e.response.text[:200]}",
+                       status_code=e.response.status_code) from e
     except httpx.HTTPError as e:
         raise LLMError(f"AI-Buddy недоступен: {e.__class__.__name__}") from e
     except (KeyError, IndexError, ValueError) as e:
@@ -152,9 +208,7 @@ def chat_stream(messages: list[dict], temperature: float = 0.2, max_tokens: int 
                 "POST", f"{url}/chat/completions",
                 headers={"Authorization": f"Bearer {token}",
                          "Content-Type": "application/json"},
-                json={"model": model, "messages": messages,
-                      "temperature": temperature, "max_tokens": max_tokens,
-                      "reasoning_effort": "low", "stream": True},
+                json=_payload(messages, temperature, max_tokens, model, stream=True),
                 timeout=TIMEOUT) as r:
             r.raise_for_status()
             for line in r.iter_lines():
@@ -170,9 +224,80 @@ def chat_stream(messages: list[dict], temperature: float = 0.2, max_tokens: int 
                 if delta:
                     yield delta
     except httpx.HTTPStatusError as e:
-        raise LLMError(f"HTTP {e.response.status_code}: {e.response.read()[:200]!r}") from e
+        raise LLMError(f"HTTP {e.response.status_code}: {e.response.read()[:200]!r}",
+                       status_code=e.response.status_code) from e
     except httpx.HTTPError as e:
         raise LLMError(f"AI-Buddy недоступен: {e.__class__.__name__}") from e
+
+
+def _accumulate_tool_delta(acc: dict, delta: dict) -> dict:
+    """Накопление разорванных дельт tool_calls (OpenAI-стриминг) — чистая функция для тестов.
+
+    delta — объект delta из SSE-чанка; acc — {index: {id,name,arguments}}.
+    Шлюзы без поля index: каждая новая запись с именем открывает новый слот.
+    """
+    for tc in delta.get("tool_calls") or []:
+        i = tc.get("index")
+        if i is None:
+            i = len(acc) if (tc.get("function") or {}).get("name") else (max(acc) if acc else 0)
+        a = acc.setdefault(i, {"id": "", "name": "", "arguments": ""})
+        if tc.get("id"):
+            a["id"] = tc["id"]
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            a["name"] = fn["name"]
+        if fn.get("arguments"):
+            a["arguments"] += fn["arguments"]
+    return acc
+
+
+def chat_stream_tools(messages: list[dict], tools: list[dict], temperature: float = 0.2,
+                      max_tokens: int = 2500, model: str = ""):
+    """Стриминг с tools: генератор событий
+      {"type":"delta", "text": str}                       — дельта контента, или
+      {"type":"tool_calls", "tool_calls": [{id,name,arguments}]} — в конце раунда.
+
+    Дельты tool_calls (разорванные фрагменты arguments) накапливаются по index.
+    Бросает LLMError при ошибке, в т.ч. если прокси/модель не поддерживают tools.
+    """
+    url, token, def_model = config()
+    if not (url and token):
+        raise LLMError("AI-Buddy не сконфигурирован (админ-панель → Интеграции)")
+    model = (model or "").strip() or def_model
+    acc: dict[int, dict] = {}
+    try:
+        with httpx.stream(
+                "POST", f"{url}/chat/completions",
+                headers={"Authorization": f"Bearer {token}",
+                         "Content-Type": "application/json"},
+                json=_payload(messages, temperature, max_tokens, model, tools=tools,
+                              stream=True),
+                timeout=TIMEOUT) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(data)["choices"][0].get("delta") or {}
+                except (KeyError, IndexError, ValueError):
+                    continue
+                if delta.get("content"):
+                    yield {"type": "delta", "text": delta["content"]}
+                _accumulate_tool_delta(acc, delta)
+    except httpx.HTTPStatusError as e:
+        raise LLMError(f"HTTP {e.response.status_code}: {e.response.read()[:200]!r}",
+                       status_code=e.response.status_code) from e
+    except httpx.HTTPError as e:
+        raise LLMError(f"AI-Buddy недоступен: {e.__class__.__name__}") from e
+    if acc:
+        calls = []
+        for i, a in sorted(acc.items()):
+            calls.append({**a, "id": a["id"] or f"call_{i}",
+                          "arguments": a["arguments"] or "{}"})
+        yield {"type": "tool_calls", "tool_calls": calls}
 
 
 def test_connection(url: str = "", token: str = "", model: str = "") -> dict:

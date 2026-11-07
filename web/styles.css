@@ -211,6 +211,8 @@ main:has(.chat-wrap){max-width:none}
   flex:0 0 30px;margin-top:2px;box-shadow:var(--shadow-sm)}
 .avatar.big{width:44px;height:44px;flex-basis:44px;font-size:16px;margin:0 auto}
 .chat-cites{margin-top:10px;flex-wrap:wrap;gap:6px}
+.chat-tools{margin-bottom:6px;display:flex;flex-direction:column;gap:2px}
+.chat-tools div{font-family:var(--mono, ui-monospace, monospace);font-size:11px;opacity:.75}
 .chat-meta{margin-top:8px;align-items:center;gap:8px;flex-wrap:wrap}
 .small-badge{font-size:11px;padding:2px 8px}
 .chatcode{background:var(--surface2);border:1px solid var(--line);border-radius:var(--r);

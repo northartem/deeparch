@@ -1305,7 +1305,7 @@ def assistant(body=Body(...), user=Depends(current_user)):
         raise HTTPException(400, "service_id должен быть числом")
     chat_id = _chat_session(user["id"], body.get("chat_id"), question)
     _chat_save(user["id"], chat_id, "user", question)
-    r = kb.answer(question, history=clean, model=model, service_id=service_id)
+    r = kb.answer(question, history=clean, model=model, service_id=service_id, user=user)
     _chat_save(user["id"], chat_id, "assistant", r["answer"], provider=r["provider"],
                model=r.get("model"), confidence=r.get("confidence"),
                citations=r.get("citations"))
@@ -1340,7 +1340,7 @@ def assistant_stream(body=Body(...), user=Depends(current_user)):
     def gen():
         meta, parts = {}, []
         for ev in kb.answer_stream(question, history=clean, model=model,
-                                   service_id=service_id):
+                                   service_id=service_id, user=user):
             if ev["type"] == "meta":
                 meta = ev
                 ev = {**ev, "chat_id": chat_id}   # клиент запоминает чат
