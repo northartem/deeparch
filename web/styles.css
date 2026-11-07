@@ -30,14 +30,15 @@ body{background:var(--bg);color:var(--txt);font-family:Inter,ui-sans-serif,-appl
 .topbar{display:flex;align-items:center;gap:20px;padding:0 24px;height:56px;
   position:sticky;top:0;background:rgba(255,255,255,.85);backdrop-filter:blur(12px) saturate(1.4);
   border-bottom:1px solid var(--line);z-index:5}
-.brand{font-weight:700;font-size:15px;letter-spacing:-.2px;display:flex;align-items:center;gap:8px}
-.brand .sub{color:var(--faint);font-weight:500;font-size:12px;padding-left:8px;border-left:1px solid var(--line)}
-nav{display:flex;gap:2px;flex:1}
-nav a{color:var(--mut);text-decoration:none;padding:6px 12px;border-radius:8px;font-weight:500;font-size:13.5px;transition:.12s}
+.brand{font-weight:700;font-size:15px;letter-spacing:-.2px;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.brand .sub{color:var(--faint);font-weight:500;font-size:12px;padding-left:8px;border-left:1px solid var(--line);white-space:nowrap}
+nav{display:flex;gap:2px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+nav a{color:var(--mut);text-decoration:none;padding:6px 12px;border-radius:8px;font-weight:500;font-size:13.5px;transition:.12s;white-space:nowrap;flex:none}
 nav a:hover{color:var(--txt);background:var(--surface2)}
 nav a.act{color:var(--txt);background:var(--surface2);font-weight:600}
-#userbox{display:flex;align-items:center;gap:10px;color:var(--mut);font-size:13px}
-#userbox b{color:var(--txt);font-weight:600}
+#userbox{display:flex;align-items:center;gap:10px;color:var(--mut);font-size:13px;flex-shrink:0}
+#userbox b{color:var(--txt);font-weight:600;white-space:nowrap}
 
 /* ---------- layout ---------- */
 main{max-width:1120px;margin:0 auto;padding:32px 24px 90px}
@@ -108,6 +109,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .b-in_review{background:var(--accent-soft);color:var(--accent);border-color:#c7d2fe}
 .b-approved{background:var(--ok-soft);color:var(--ok);border-color:var(--ok-line)}
 .b-changes_requested{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
+.b-decommissioned{background:var(--surface2);color:var(--mut);border-color:var(--line)}
 .b-proposed{background:var(--surface2);color:var(--mut);border-color:var(--line)}
 .b-deprecated{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
 .b-removed{background:var(--bad-soft);color:var(--bad);border-color:var(--bad-line)}
@@ -260,3 +262,19 @@ main:has(.chat-wrap){max-width:none}
   background:#f8fafc;touch-action:none;user-select:none}
 #c4-g text{pointer-events:none}
 #c4-props input,#c4-props textarea,#c4-props select{width:100%;margin-bottom:6px}
+
+/* --- дашборд: кликабельные KPI-карточки и «тихие» ссылки-агрегаты --- */
+a.kpi-link{text-decoration:none;color:inherit;display:block}
+a.kpi-link:hover{border-color:var(--accent);transition:border-color .15s}
+a.no-ul{text-decoration:none}
+a.no-ul:hover span{text-decoration:underline}
+
+/* --- адаптивность топбара: меню сжимается в внутренний скролл вместо скролла всей страницы --- */
+@media (max-width: 1279px){ .brand .sub{display:none} }
+@media (max-width: 1059px){ .u-role{display:none} }
+@media (max-width: 859px){
+  .topbar{gap:10px;padding:0 14px}
+  nav a{padding:6px 9px;font-size:13px}
+}
+/* --- таблицы: не разрывать идентификаторы при переносе --- */
+td .badge:first-child{margin-right:6px}

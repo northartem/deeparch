@@ -80,15 +80,72 @@ def test_full_cycle_save_read_export(client, auth, sid):
     assert ai["view"] == "context"
 
 
-def test_export_empty_models_wipes_handwritten_source(client, auth, sid):
-    """Известный риск: экспорт пустых моделей затирает рукописный diagram_code."""
+def test_export_empty_models_blocked_then_force(client, auth, sid):
+    """Экспорт пустых моделей блокируется валидацией; force осознанно затирает рукописный исходник."""
     A = auth["admin"]
     client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": {"nodes": [], "edges": []}})
     client.put(f"/api/services/{sid}/c4/container", headers=A, json={"model": {"nodes": [], "edges": []}})
-    client.post(f"/api/services/{sid}/c4/export", headers=A, json={})
+    blocked = client.post(f"/api/services/{sid}/c4/export", headers=A, json={})
+    assert blocked.status_code == 409, blocked.text
+    assert "обе модели пусты" in blocked.json()["detail"]
+    client.post(f"/api/services/{sid}/c4/export", headers=A, json={"force": True})
     after = next(a for a in client.get(f"/api/services/{sid}", headers=A).json()["artifacts"]
                  if a["kind"] == "vision_c4")
     assert (after["diagram_code"] or "") == ""
+
+
+def test_export_validation_report(client, auth, sid, monkeypatch):
+    """dry_run возвращает отчёт валидации; блокеры и предупреждения детерминированы."""
+    import app.c4 as c4m
+    A = auth["admin"]
+    # L1 без нашего сервиса (только external) → блокер; персоны нет → предупреждение
+    client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": {
+        "nodes": [{"id": "x1", "type": "external", "name": "PayGate", "x": 1, "y": 1}],
+        "edges": []}})
+    rep = client.post(f"/api/services/{sid}/c4/export", headers=A, json={"dry_run": True}).json()["validation"]
+    assert any("нет нашего сервиса" in b for b in rep["blockers"])
+    assert any("нет ни одной персоны" in w for w in rep["warnings"])
+
+    # висячие связи гасятся normalize при сохранении; validate_models защищает и этот случай
+    monkeypatch.setattr(c4m, "load", lambda _sid: {
+        "context": {"nodes": [{"id": "s1", "type": "system", "name": "Наш сервис", "x": 1, "y": 1}],
+                    "edges": [{"id": "e1", "from": "s1", "to": "ghost", "label": "x", "tech": ""}]},
+        "container": {"nodes": [], "edges": []}})
+    rep2 = c4m.validate_models(sid)
+    assert any("несуществующие узлы" in b for b in rep2["blockers"])
+    monkeypatch.undo()
+
+    # корректная L1 → блокеров нет; L2 пустая → предупреждение, но экспорт проходит
+    client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": {
+        "nodes": [{"id": "p1", "type": "person", "name": "Клиент", "x": 1, "y": 1},
+                  {"id": "s1", "type": "system", "name": "Наш сервис", "x": 300, "y": 1}],
+        "edges": [{"id": "e1", "from": "p1", "to": "s1", "label": "использует", "tech": "HTTPS"}]}})
+    client.put(f"/api/services/{sid}/c4/container", headers=A, json={"model": {"nodes": [], "edges": []}})
+    rep = client.post(f"/api/services/{sid}/c4/export", headers=A, json={"dry_run": True}).json()["validation"]
+    assert rep["blockers"] == []
+    assert any("не нарисованы" in w for w in rep["warnings"])
+    ok = client.post(f"/api/services/{sid}/c4/export", headers=A, json={})
+    assert ok.status_code == 200 and "validation" in ok.json()
+
+
+def test_l1_l2_cascade_context(client, auth):
+    """Каскад L1→L2: сохранённая L1 попадает в контекст генерации L2; без L1 — пусто."""
+    import app.c4 as c4m
+    A = auth["admin"]
+    sid = client.post("/api/services", headers=A, json={"code": "CASC1", "name": "Каскад",
+                                                        "project_type": "mvp"}).json()["id"]
+    assert c4m._l1_context(sid) == ""           # L1 ещё не сохранена
+    client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": {
+        "nodes": [{"id": "p1", "type": "person", "name": "Клиент", "x": 1, "y": 1},
+                  {"id": "s1", "type": "system", "name": "Наш сервис", "x": 300, "y": 1}],
+        "edges": [{"id": "e1", "from": "p1", "to": "s1", "label": "оформляет", "tech": "HTTPS"}]}})
+    ctx = c4m._l1_context(sid)
+    assert "Клиент (person)" in ctx and "Наш сервис (system)" in ctx
+    assert "Клиент → Наш сервис (оформляет)" in ctx
+    # битый JSON в c4_models не роняет каскад
+    from app.db import exec as _exec
+    _exec("UPDATE c4_models SET model_json='{битый' WHERE service_id=? AND view='context'", (sid,))
+    assert c4m._l1_context(sid) == ""
 
 
 def test_nan_inf_coordinates(client, auth, sid):

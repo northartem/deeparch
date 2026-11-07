@@ -182,6 +182,36 @@ def build_code(service_id: int) -> str:
     return "\n\n".join(parts)
 
 
+def validate_models(service_id: int) -> dict:
+    """Валидация перед экспортом: детерминированные проверки без LLM.
+    blockers — экспорт бессмыслен/опасен (409 без force), warnings — на усмотрение автора."""
+    models = load(service_id)
+    l1, l2 = models["context"], models["container"]
+    blockers, warnings = [], []
+    if not l1["nodes"] and not l2["nodes"]:
+        blockers.append("обе модели пусты — экспорт затрёт исходник диаграммы")
+    else:
+        if not l1["nodes"]:
+            warnings.append("Контекст (L1) пуст — экспортируются только контейнеры")
+        elif not any(n["type"] == "system" for n in l1["nodes"]):
+            blockers.append("в контексте (L1) нет нашего сервиса — нужен узел типа «система»")
+        if not any(n["type"] == "person" for n in l1["nodes"]):
+            warnings.append("в контексте (L1) нет ни одной персоны (пользователя/актора)")
+        if l1["nodes"] and not l2["nodes"]:
+            warnings.append("контейнеры (L2) не нарисованы — на ревью обычно спрашивают внутреннее устройство")
+    for view, m in (("context", l1), ("container", l2)):
+        ids = {n["id"] for n in m["nodes"]}
+        dangling = [e for e in m["edges"] if e["from"] not in ids or e["to"] not in ids]
+        if dangling:
+            blockers.append(f"{VIEWS[view]}: {len(dangling)} связей ссылаются на несуществующие узлы")
+        isolated = [n["name"] for n in m["nodes"]
+                    if not any(e["from"] == n["id"] or e["to"] == n["id"] for e in m["edges"])]
+        if isolated and ids:
+            warnings.append(f"{VIEWS[view]}: узлы без связей — "
+                            f"{', '.join(isolated[:5])}" + ("…" if len(isolated) > 5 else ""))
+    return {"blockers": blockers, "warnings": warnings}
+
+
 def export_to_artifact(service_id: int, user: str) -> dict:
     """Кладёт Mermaid-исходники обоих видов в diagram_code артефакта vision_c4."""
     code = build_code(service_id)
@@ -220,8 +250,34 @@ def _fallback_model(service_id: int, view: str) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+def _l1_context(service_id: int) -> str:
+    """Каскад L1→L2: сохранённая модель контекста как вход для проектирования контейнеров."""
+    row = q1("SELECT model_json FROM c4_models WHERE service_id=? AND view='context'", (service_id,))
+    if not row:
+        return ""
+    try:
+        mj = json.loads(row["model_json"])
+    except (ValueError, TypeError):
+        return ""
+    nodes = [n for n in (mj.get("nodes") or []) if isinstance(n, dict)]
+    if not nodes:
+        return ""
+    lines = ["Сохранённая модель контекста (L1) — L2 должен быть согласован с ней:",
+             "- участники: " + "; ".join(
+                 f"{n.get('name', '?')} ({n.get('type', 'system')})" for n in nodes)]
+    edges = [e for e in (mj.get("edges") or []) if isinstance(e, dict)]
+    if edges:
+        names = {n.get("id"): n.get("name", "?") for n in nodes}
+        lines.append("- связи: " + "; ".join(
+            f"{names.get(e.get('from'), e.get('from'))} → "
+            f"{names.get(e.get('to'), e.get('to'))}"
+            + (f" ({e['label']})" if e.get("label") else "") for e in edges))
+    return "\n".join(lines)
+
+
 def ai_design(service_id: int, view: str, model: str = "") -> dict:
-    """Сценарий 2: AI-структура — LLM проектирует C4-модель из фактов и требований."""
+    """Сценарий 2: AI-структура — LLM проектирует C4-модель из фактов и требований.
+    Для L2 вход дополнен сохранённой L1 (каскад: контейнеры согласованы с контекстом)."""
     if view not in VIEWS:
         raise ValueError(f"view должен быть: {', '.join(VIEWS)}")
     fallback = _fallback_model(service_id, view)
@@ -232,8 +288,13 @@ def ai_design(service_id: int, view: str, model: str = "") -> dict:
                  if view == "context" else
                  "Контейнеры (L2): внутри нашего сервиса — контейнеры и БД; "
                  "снаружи — персоны и внешние системы.")
-    user_prompt = (f"{view_hint}\n\nФакты о сервисе:\n{ai._service_facts(service_id)}\n\n"
-                   f"Спроектируй {VIEWS[view]} для этого сервиса.")
+    l1 = _l1_context(service_id) if view == "container" else ""
+    parts = [view_hint]
+    if l1:
+        parts.append(l1)
+    parts += [f"Факты о сервисе:\n{ai._service_facts(service_id)}",
+              f"Спроектируй {VIEWS[view]} для этого сервиса."]
+    user_prompt = "\n\n".join(parts)
     try:
         raw = llm.chat([{"role": "system", "content": AI_SYSTEM},
                         {"role": "user", "content": user_prompt}],

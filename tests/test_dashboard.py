@@ -118,3 +118,31 @@ def test_readiness_sorting(client, auth):
     r9 = client.get("/api/dashboard", headers=auth["admin"]).json()["readiness"]
     missing_lens = [len(x["mandatory_missing"]) for x in r9]
     assert missing_lens == sorted(missing_lens, reverse=True)
+
+
+def test_dashboard_navigation_fields(client, auth):
+    """UI-навигация дашборда: hint_link на вкладку сервиса, coverage с id,
+    активность с человекочитаемыми формулировками (аддитивно к старому контракту)."""
+    A = auth["admin"]
+    d = client.get("/api/dashboard", headers=A).json()
+    tabs = {"artifacts", "check", "fitness", "review"}
+    for r in d["readiness"]:
+        assert r["hint_link"] == f"/service/{r['id']}/" + r["hint_link"].rsplit("/", 1)[1]
+        assert r["hint_link"].rsplit("/", 1)[1] in tabs
+    for key in ("no_requirements", "no_c4", "no_checklist"):
+        for x in d["coverage"][key]:
+            assert {"id", "code"} <= set(x), (key, x)
+    act = d["activity"]
+    assert act and {"action_label", "entity_label"} <= set(act[0])
+    for a in act[:5]:
+        import re as _re
+        m = _re.match(r"service:(\d+)", a["entity"] or "")
+        if m:
+            assert "service:" not in a["entity_label"], a
+    # несуществующее действие не ломает подачу — показывается как есть
+    from app.db import exec as _exec
+    from app.db import now as _now
+    _exec("INSERT INTO audit_log(ts,user,action,entity,detail) VALUES(?,?,?,?,?)",
+          (_now(), "admin", "totally_new_action", "service:1", "x"))
+    a2 = client.get("/api/dashboard", headers=A).json()["activity"][0]
+    assert a2["action"] == "totally_new_action" and a2["action_label"] == "totally_new_action"

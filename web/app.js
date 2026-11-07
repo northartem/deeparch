@@ -13,6 +13,9 @@ if(window.mermaid){
 }
 const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const badge = (txt, cls) => `<span class="badge b-${cls}">${esc(txt)}</span>`;
+/* права на изменение сервиса: full (эксперт/админ) или team (владелец/product-группа) */
+const canEditSvc = s => s.my_scope === 'full' || s.my_scope === 'team';
+const canCreateSvc = () => ['admin','domain_expert','team_lead'].includes(S.user.role);
 const gradeB = g => badge(g==='E'?'Есть':g==='Ch'?'Частично':'Нет', g);
 const weightB = w => badge(w==='mandatory'?'обязательный':w==='desired'?'желательно':'не обязательный', w);
 const statusB = s => badge(s.replace('_',' '), s);
@@ -30,10 +33,14 @@ const route = (re, fn) => routes.push([re, fn]);
 async function render(){
   if(!S.user){ return viewLogin(); }
   const h = location.hash || '#/';
-  const nav = {'#/':'Дашборд','#/services':'Сервисы','#/assistant':'Ассистент','#/debts':'Техдолг','#/components':'Компоненты','#/access':'Доступ','#/admin':'Интеграции'};
+  // пункты меню показываем только там, где у роли есть хоть какие-то права
+  // (иначе страница встречает 403-текстом или стеной disabled-кнопок)
+  const nav = {'#/':'Дашборд','#/services':'Сервисы','#/assistant':'Ассистент','#/debts':'Техдолг','#/components':'Компоненты'};
+  if(['admin','domain_expert'].includes(S.user.role)) nav['#/access'] = 'Доступ';
+  if(['admin','domain_expert','infosec'].includes(S.user.role)) nav['#/admin'] = 'Интеграции';
   $('#nav').innerHTML = Object.entries(nav).map(([u,t]) =>
     `<a href="${u}" class="${h.startsWith(u)&&u!=='#/'||h===u?'act':''}">${t}</a>`).join('');
-  $('#userbox').innerHTML = `${esc(S.user.display_name)} · ${S.user.role} <button class="sec" onclick="logout()">Выйти</button>`;
+  $('#userbox').innerHTML = `<b class="u-name">${esc(S.user.display_name)}</b><span class="u-role"> · ${S.user.role}</span> <button class="sec" onclick="logout()">Выйти</button>`;
   if(!S.standard) S.standard = await api('/standard');
   for(const [re, fn] of routes){ const m = h.match(re); if(m) return fn(...m.slice(1)); }
   return viewDash();
@@ -89,17 +96,24 @@ async function viewDash(){
   const st = s => d.by_review_status.find(x=>x.review_status===s)?.n||0;
   const dp = p => d.debt_by_priority.find(x=>x.priority===p)?.n||0;
   const debtOpen = dp('P0') + dp('P1') + dp('P2') + dp('P3');
-  const covCard = (t, list, link) => `<div class="card"><div class="mut">${t}</div>
+  const covCard = (t, list, link) => {
+    const shown = list.slice(0, 5);
+    const more = list.length - shown.length;
+    return `<div class="card"><div class="mut">${t}</div>
     <div class="kpi" style="color:${list.length ? 'var(--warn)' : 'var(--ok)'}">${list.length}</div>
-    <div class="small mut">${list.length ? esc(list.map(x=>x.code).join(', ')) : 'покрыто полностью'}${link ? ` · <a class="lnk" href="${link}">реестр</a>` : ''}</div></div>`;
+    <div class="small mut">${list.length
+      ? shown.map(x=>`<a class="lnk" href="#/service/${x.id}">${esc(x.code)}</a>`).join(', ')
+        + (more > 0 ? ` · <a class="lnk" href="${link}">+${more} ещё</a>` : '')
+      : 'покрыто полностью'}</div></div>`;
+  };
   $('#view').innerHTML = `
   <h1>Дашборд соответствия стандарту</h1>
   <p class="mut"><a class="lnk" href="${d.standard_ref}" target="_blank">Общий архитектурный стандарт (Architecture Definition Set) ↗</a></p>
   <div class="grid g4" style="margin:18px 0">
-    <div class="card vio"><div class="mut">Сервисов в реестре</div><div class="kpi">${d.total_services}</div></div>
-    <div class="card"><div class="mut">На ревью / согласовано</div><div class="kpi">${st('in_review')} <span class="mut" style="font-size:16px">/</span> <span style="color:var(--ok)">${st('approved')}</span></div></div>
-    <div class="card cya"><div class="mut">Нужны изменения</div><div class="kpi" style="color:var(--warn)">${st('changes_requested')}</div></div>
-    <div class="card"><div class="mut">Открытый техдолг P0+P1</div><div class="kpi" style="color:${dp('P0')+dp('P1') ? 'var(--bad)' : 'var(--ok)'}">${dp('P0')+dp('P1')}</div><div class="small mut">всего открытых: ${debtOpen}</div></div>
+    <a class="card vio kpi-link" href="#/services" onclick="S.showArchived=${d.archived_services>0}"><div class="mut">Сервисов в реестре</div><div class="kpi">${d.total_services}</div><div class="small mut">${d.archived_services ? `в архиве: ${d.archived_services}` : 'все активные'}</div></a>
+    <a class="card kpi-link" href="#/services"><div class="mut">На ревью / согласовано</div><div class="kpi">${st('in_review')} <span class="mut" style="font-size:16px">/</span> <span style="color:var(--ok)">${st('approved')}</span></div></a>
+    <a class="card cya kpi-link" href="#/services"><div class="mut">Нужны изменения</div><div class="kpi" style="color:${st('changes_requested') ? 'var(--warn)' : 'var(--ok)'}">${st('changes_requested')}</div></a>
+    <a class="card kpi-link" href="#/debts"><div class="mut">Открытый техдолг P0+P1</div><div class="kpi" style="color:${dp('P0')+dp('P1') ? 'var(--bad)' : 'var(--ok)'}">${dp('P0')+dp('P1')}</div><div class="small mut">всего открытых: ${debtOpen}</div></a>
   </div>
   ${(d.my_tasks.pending_reviews.length || d.my_tasks.blockers.length) ? `
   <h2>Мои задачи</h2>
@@ -118,10 +132,10 @@ async function viewDash(){
     return `<tr><td><a class="lnk" href="#/service/${r.id}"><b>${esc(r.name)}</b> <span class="mut">${esc(r.code)}</span></a></td>
     <td><b>${fill}/${r.mandatory_total}</b>${r.mandatory_missing.length ? `<div class="small mut">нет: ${esc(r.mandatory_missing.map(m=>m.title).join(', '))}</div>` : '<div class="small" style="color:var(--ok)">все обязательные заполнены</div>'}</td>
     <td>${r.self_check == null ? '<span class="mut">не проводился</span>' : `<div class="bar" style="width:110px"><i style="width:${r.self_check}%"></i></div><span class="small mut">${r.self_check}%</span>`}</td>
-    <td>${FIT_DOT(r.fitness)}</td>
-    <td>${r.debts_open ? `<span ${r.debts_p0 ? 'style="color:var(--bad);font-weight:600"' : ''}>${r.debts_open}</span> <span class="mut small">откр.</span>` : '<span class="mut">—</span>'}</td>
+    <td><a class="lnk no-ul" href="#/service/${r.id}/fitness" title="Открыть fitness-проверки">${FIT_DOT(r.fitness)}</a></td>
+    <td>${r.debts_open ? `<a class="lnk no-ul" href="#/service/${r.id}/debt" title="Открыть техдолг сервиса"><span ${r.debts_p0 ? 'style="color:var(--bad);font-weight:600"' : ''}>${r.debts_open}</span> <span class="mut small">откр.</span></a>` : '<span class="mut">—</span>'}</td>
     <td>${statusB(r.review_status)}</td>
-    <td class="small">${esc(r.hint)}</td></tr>`;
+    <td class="small"><a class="lnk" href="#${r.hint_link}">${esc(r.hint)}</a></td></tr>`;
   }).join('')}
   </table></div>
   <h2>Риски и техдолг</h2>
@@ -143,7 +157,7 @@ async function viewDash(){
   </div>
   ${d.activity.length ? `<h2>Последние события</h2>
   <div class="card"><table class="small">${d.activity.slice(0,8).map(a=>`<tr><td class="mut" style="white-space:nowrap">${fmtTs(a.ts)}</td><td>${esc(a.user)}</td>
-    <td>${esc(a.action)}</td><td class="mut">${esc(a.entity)}${a.detail ? ' · ' + esc(String(a.detail)).slice(0,60) : ''}</td></tr>`).join('')}</table></div>` : ''}
+    <td>${esc(a.action_label || a.action)}</td><td class="mut" title="${esc(a.entity || '')}">${esc(a.entity_label || a.entity || '')}${a.detail ? ' · ' + esc(String(a.detail)).slice(0,60) : ''}</td></tr>`).join('')}</table></div>` : ''}
   <h2>Переиспользование компонентов</h2>
   <div class="card"><table><tr><th>Компонент</th><th>Статус</th><th>Используют сервисов</th></tr>
   ${d.component_usage.map(c=>`<tr><td>${esc(c.name)}</td><td>${statusB(c.status)}</td><td><b>${c.used_by}</b>${c.used_by ? '' : ' <span class="small mut">— нет потребителей</span>'}</td></tr>`).join('')}
@@ -153,12 +167,16 @@ async function viewDash(){
 
 /* ---------- services ---------- */
 async function viewServices(){
-  const list = await api('/services');
+  const list = await api('/services'+(S.showArchived?'?include_archived=1':''));
   $('#view').innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center">
-    <h1>Реестр сервисов</h1><button onclick="formService()">+ Сервис</button></div>
+    <h1>Реестр сервисов</h1>
+    <div style="display:flex;gap:10px;align-items:center">
+      <label class="small mut" style="cursor:pointer"><input type="checkbox" ${S.showArchived?'checked':''}
+        onchange="S.showArchived=this.checked;viewServices()"> показать архив</label>
+      <button onclick="formService()" ${canCreateSvc()?'':'disabled title="Создание сервисов: team_lead, domain_expert, admin"'}>+ Сервис</button></div></div>
   <p class="mut">Карточка сервиса (BR-01, пункт 10 чек-листа) · тип проекта определяет обязательный набор артефактов</p>
   <div class="card" style="margin-top:16px"><table><tr><th>Сервис</th><th>Тип проекта</th><th>Владелец / архитектор</th><th>Self-check</th><th>Ревью</th><th>CMDB</th></tr>
-  ${list.map(s=>`<tr><td><a class="lnk" href="#/service/${s.id}"><b>${esc(s.name)}</b></a><div class="small mut">${esc(s.code)} · ${esc(s.domain||'—')}</div></td>
+  ${list.map(s=>`<tr><td><a class="lnk" href="#/service/${s.id}"><b>${esc(s.name)}</b></a>${s.lifecycle==='decommissioned'?' <span class="badge b-decommissioned">выведен</span>':''}<div class="small mut">${esc(s.code)} · ${esc(s.domain||'—')}</div></td>
     <td class="small">${esc(S.standard.project_types[s.project_type]?.title||s.project_type)}</td>
     <td class="small">${esc(s.owner||'—')} / ${esc(s.architect||'—')}</td>
     <td><div class="bar" style="width:110px"><i style="width:${s.last_score||0}%"></i></div><span class="small mut">${s.last_score||0}%</span></td>
@@ -166,10 +184,26 @@ async function viewServices(){
     <td class="small">${s.cmdb_id?`<code>${esc(s.cmdb_id)}</code>`:'<span class="mut">—</span>'}</td></tr>`).join('')}
   </table></div>`;
 }
+async function setLifecycle(id, lc){
+  await api('/services/'+id, {method:'PATCH', body: JSON.stringify({lifecycle:lc})});
+  toast(lc==='decommissioned' ? 'Сервис выведен из эксплуатации (архив)' : 'Сервис возвращён в работу');
+  viewService(id,'card');
+}
+async function deleteService(id){
+  const s = await api('/services/'+id).catch(()=>null);
+  if(!s) return;
+  const code = prompt(`Необратимо удалить сервис ${s.name} и ВСЕ его данные (артефакты, C4, ревью, техдолг)?\nДля подтверждения введите код сервиса: ${s.code}`);
+  if(code===null) return;
+  try{
+    await api('/services/'+id, {method:'DELETE', body: JSON.stringify({confirm:code.trim()})});
+    toast('Сервис удалён'); location.hash = '#/services'; viewServices();
+  }catch(e){ toast(e.message, true); }
+}
 function formService(){
   const opts = Object.entries(S.standard.project_types).map(([k,v])=>`<option value="${k}">${esc(v.title)}</option>`).join('');
   openModal('Service Factory — новый сервис (BR-45…47)', `
-    <p class="small mut">Генерирует стартовый архитектурный пакет: 7 артефактов по шаблонам стандарта,
+    <p class="small mut">Генерирует стартовый архитектурный пакет: все артефакты по шаблонам стандарта
+    (${S.standard.artifacts.length} шт.),
     пустой self-check и подключение всех approved-компонентов каталога (compliance by construction).</p>
     <div class="grid g2"><div><label>Код (напр. MPR)</label><input id="f-code"></div>
     <div><label>Название</label><input id="f-name"></div></div>
@@ -177,18 +211,50 @@ function formService(){
     <div><label>Домен</label><input id="f-domain"></div></div>
     <div class="grid g2"><div><label>Владелец</label><input id="f-owner" value="${esc(S.user.username)}"></div>
     <div><label>Архитектор</label><input id="f-arch" value="${esc(S.user.username)}"></div></div>
-    <div class="btnrow"><button onclick="createService()">Сгенерировать пакет</button></div>`);
+    <div style="margin-top:10px"><label>Из документа — ТЗ / письмо / описание задачи (Design Session)</label>
+    <textarea id="f-doc" style="min-height:90px" placeholder="Вставьте текст — извлечём черновик карточки и требования (advisory, проверьте перед созданием)"></textarea></div>
+    <div class="btnrow"><button class="sec" onclick="extractFromDoc()">⎘ Заполнить из документа</button></div>
+    <div class="btnrow"><button onclick="createService()">Сгенерировать пакет</button>
+    <button class="sec" onclick="closeModal()">Отмена</button></div>`);
+}
+let _REQ_DRAFT = [];  // требования, разобранные из документа до создания сервиса
+async function extractFromDoc(){
+  const text = $('#f-doc').value.trim();
+  if(!text){ toast('Вставьте текст документа', true); return; }
+  const btn = [...document.querySelectorAll('#modal button')].find(b=>b.textContent.includes('Заполнить из документа'));
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Извлекаю…'; }
+  try{
+    const r = await api('/ai/service-extract', {method:'POST', body: JSON.stringify({text})});
+    const d = r.draft || {};
+    if(d.code) $('#f-code').value = d.code;
+    if(d.name) $('#f-name').value = d.name;
+    if(d.domain) $('#f-domain').value = d.domain;
+    if(d.project_type && S.standard.project_types[d.project_type]) $('#f-pt').value = d.project_type;
+    _REQ_DRAFT = (d.requirements||[]).map(x=>({req_type: x.req_type || (String(x.type||'')[0]==='Н'?'nonfunc':'func'),
+                                               text: x.text||''})).filter(x=>x.text);
+    toast(`Извлечено (${r.provider}): ${_REQ_DRAFT.length} требований. Проверьте поля — решение за вами.`);
+  }catch(e){ toast(esc(e.message), true); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = '⎘ Заполнить из документа'; } }
 }
 async function createService(){
   try{
     const r = await api('/factory/scaffold', {method:'POST', body: JSON.stringify({
       code:$('#f-code').value, name:$('#f-name').value, project_type:$('#f-pt').value,
       domain:$('#f-domain').value, owner:$('#f-owner').value, architect:$('#f-arch').value})});
+    let reqNote = '';
+    if(_REQ_DRAFT.length){
+      try{
+        const ri = await api('/services/'+r.id+'/requirements/import',
+                             {method:'POST', body: JSON.stringify({items:_REQ_DRAFT})});
+        reqNote = `<p class="small mut">Импортировано требований из документа: <b>${ri.created.length}</b>.</p>`;
+      }catch(e){ reqNote = `<p class="small" style="color:var(--bad)">Требования не импортированы: ${esc(e.message)} — добавьте вручную на вкладке «Требования».</p>`; }
+      _REQ_DRAFT = [];
+    }
     closeModal();
     openModal(`Сервис ${esc(r.code)} создан`, `
       <p class="small mut">Сгенерировано: ${r.artifacts} артефактов по шаблонам стандарта ·
       подключено компонентов: ${r.components_attached.length}
-      (${esc(r.components_attached.join(', ')||'—')}).</p>
+      (${esc(r.components_attached.join(', ')||'—')}).</p>${reqNote}
       <h2 style="margin:10px 0 4px">Next steps</h2>
       <ol class="small">${r.next_steps.map(s=>`<li style="margin:4px 0">${esc(s)}</li>`).join('')}</ol>
       <div class="btnrow"><button onclick="closeModal();location.hash='#/service/${r.id}'">Открыть сервис</button></div>`);
@@ -301,26 +367,47 @@ function tabDiagrams(s){
   withDiag.forEach(a => renderDiag(document.getElementById('dvx-'+a.kind), byKind[a.kind].diagram_code));
 }
 
+const _stepLink = (sid, t) =>
+  /Заполнить артефакты/.test(t) ? `#/service/${sid}/artifacts` :
+  /C4-модель/.test(t) ? `#/service/${sid}/design` :
+  /self-check/i.test(t) ? `#/service/${sid}/check` :
+  `#/service/${sid}/review`;
 function tabCard(s){
+  const chk = s.checklist_runs[0];
+  // свёрка сигналов: self-check пройден, но next_steps видят незаполненные артефакты
+  const stepsFill = (s.next_steps||[]).some(t=>/Заполнить артефакты/.test(t));
+  const mismatch = chk && !chk.mandatory_missing && (chk.score_pct||0) >= 100 && stepsFill;
+  const ed = canEditSvc(s);
+  const dis = ed ? '' : 'disabled';
   $('#tabbody').innerHTML = `<div class="grid g2">
-  <div class="card vio"><h2 style="margin-top:0">Карточка сервиса</h2>
-    <label>Название</label><input id="c-name" value="${esc(s.name)}">
+  <div class="card vio"><h2 style="margin-top:0">Карточка сервиса ${ed?'':'<span class="badge b-draft">только просмотр</span>'}</h2>
+    <label>Название</label><input id="c-name" value="${esc(s.name)}" ${dis}>
     <div class="grid g2"><div><label>Код</label><input value="${esc(s.code)}" disabled></div>
-    <div><label>Домен</label><input id="c-domain" value="${esc(s.domain||'')}"></div></div>
-    <div class="grid g2"><div><label>Владелец</label><input id="c-owner" value="${esc(s.owner||'')}"></div>
-    <div><label>Архитектор</label><input id="c-architect" value="${esc(s.architect||'')}"></div></div>
-    <div class="grid g2"><div><label>Тип проекта</label><select id="c-pt">${Object.entries(S.standard.project_types).map(([k,v])=>`<option value="${k}" ${k===s.project_type?'selected':''}>${esc(v.title)}</option>`).join('')}</select></div>
-    <div><label>Жизненный цикл</label><select id="c-lc">${['design','development','production','decommissioned'].map(l=>`<option ${l===s.lifecycle?'selected':''}>${l}</option>`).join('')}</select></div></div>
-    <label>CMDB ID</label><input id="c-cmdb" value="${esc(s.cmdb_id||'')}" placeholder="CI из CMDB (BR-20)">
-    <div class="btnrow"><button onclick="saveCard(${s.id})">Сохранить</button>
+    <div><label>Домен</label><input id="c-domain" value="${esc(s.domain||'')}" ${dis}></div></div>
+    <div class="grid g2"><div><label>Владелец</label><input id="c-owner" value="${esc(s.owner||'')}" ${dis}></div>
+    <div><label>Архитектор</label><input id="c-architect" value="${esc(s.architect||'')}" ${dis}></div></div>
+    <div class="grid g2"><div><label>Тип проекта</label><select id="c-pt" ${dis}>${Object.entries(S.standard.project_types).map(([k,v])=>`<option value="${k}" ${k===s.project_type?'selected':''}>${esc(v.title)}</option>`).join('')}</select></div>
+    <div><label>Жизненный цикл</label><select id="c-lc" ${dis}>${['design','development','production','decommissioned'].map(l=>`<option ${l===s.lifecycle?'selected':''}>${l}</option>`).join('')}</select></div></div>
+    <label>CMDB ID</label><input id="c-cmdb" value="${esc(s.cmdb_id||'')}" placeholder="CI из CMDB (BR-20)" ${dis}>
+    <div class="btnrow"><button onclick="saveCard(${s.id})" ${ed?'':'disabled'}>Сохранить</button>
     <button class="cya" onclick="exportCatalog(${s.id})">Экспорт catalog-info.yaml (BR-21)</button>
-    <button class="sec" onclick="askAssistantAbout(${s.id})">▲ Спросить ассистента</button></div></div>
+    <button class="sec" onclick="askAssistantAbout(${s.id})">▲ Спросить ассистента</button>
+    ${['admin','domain_expert'].includes(S.user.role) ? (s.lifecycle==='decommissioned'
+      ? `<button class="sec" onclick="setLifecycle(${s.id},'production')">↩ Вернуть в работу</button>`
+      : `<button class="sec" onclick="setLifecycle(${s.id},'decommissioned')">🗄 Вывести из эксплуатации</button>`) : ''}
+    ${S.user.role==='admin' ? `<button class="sec" style="color:var(--bad);border-color:var(--bad-line)" onclick="deleteService(${s.id})">🗑 Удалить</button>` : ''}
+    </div></div>
   <div class="card"><h2 style="margin-top:0">Обязательные артефакты для типа</h2>
     <p class="mut small">Матрица «Минимальные наборы по типам проектов» из Навигатора стандарта</p>
     ${s.mandatory_artifacts.map(k=>`<span class="chip">● ${esc(S.standard.artifacts.find(a=>a.kind===k)?.title||k)}</span>`).join('')||'<span class="mut">—</span>'}
     <h2>Последний self-check</h2>
-    ${s.checklist_runs[0]?`<div class="kpi">${s.checklist_runs[0].score_pct}%</div>
-      <p class="small mut">обязательных не закрыто: <b style="color:${s.checklist_runs[0].mandatory_missing?'var(--bad)':'var(--ok)'}">${s.checklist_runs[0].mandatory_missing}</b> · ${new Date(s.checklist_runs[0].created_at*1000).toLocaleDateString('ru')}</p>`:'<p class="mut">— не проводился</p>'}
+    ${chk?`<div class="kpi">${chk.score_pct}%</div>
+      <p class="small mut">обязательных не закрыто: <b style="color:${chk.mandatory_missing?'var(--bad)':'var(--ok)'}">${chk.mandatory_missing}</b> · ${new Date(chk.created_at*1000).toLocaleDateString('ru')}</p>`:'<p class="mut">— не проводился</p>'}
+  </div>
+  <div class="card"><h2 style="margin-top:0">Следующие шаги</h2>
+    <p class="mut small">Живой список: пересчитывается по фактическому состоянию сервиса · клик ведёт на нужную вкладку</p>
+    ${mismatch?`<p class="small" style="background:var(--warn-soft);border:1px solid var(--warn-line);color:var(--warn);border-radius:8px;padding:8px 11px;margin-bottom:8px">⚠ Self-check показывает ${chk.score_pct}%, но часть артефактов пуста — сверьте оценки в <a class="lnk" href="#/service/${s.id}/check">self-check</a></p>`:''}
+    <ol class="small">${(s.next_steps||[]).map(t=>`<li style="margin:5px 0"><a class="lnk" href="${_stepLink(s.id,t)}">${esc(t)} →</a></li>`).join('')}</ol>
   </div></div>`;
 }
 async function saveCard(id){
@@ -336,6 +423,7 @@ async function exportCatalog(id){
 }
 
 function tabArtifacts(s){
+  const ed = canEditSvc(s);
   const arts = S.standard.artifacts;
   const byKind = Object.fromEntries(s.artifacts.map(a=>[a.kind,a]));
   const mandatoryCount = s.mandatory_artifacts.filter(k => {
@@ -346,10 +434,11 @@ function tabArtifacts(s){
     <div><b>Артефакты сервиса</b>
       <span class="small mut">· обязательных для типа: ${s.mandatory_artifacts.length}${mandatoryCount?`, без контента: <b style="color:var(--bad)">${mandatoryCount}</b>`:''}</span>
     </div>
-    <button class="cya" onclick="scaffoldArtifacts(${s.id}, this)">⚡ Сгенерировать скелеты обязательных артефактов</button>
+    <button class="cya" onclick="scaffoldArtifacts(${s.id}, this)" ${ed?'':'disabled title="Нет прав на изменение сервиса"'}>⚡ Сгенерировать скелеты обязательных артефактов</button>
   </div>` + arts.map(a=>{
     const cur = byKind[a.kind]||{};
     const mandatory = s.mandatory_artifacts.includes(a.kind);
+    const dis = ed ? '' : 'disabled';
     return `<div class="card" style="margin-bottom:14px">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
       <div><b>${esc(a.title)}</b> ${mandatory?'<span class="badge b-mandatory">обязательный для типа</span>':''}
@@ -359,20 +448,19 @@ function tabArtifacts(s){
     <div class="split">
       <div>
         <label style="margin-top:10px">Описание (markdown)</label>
-        <textarea id="a-${a.kind}" placeholder="Что фиксируем: ${esc(a.captures)}">${esc(cur.content_md||'')}</textarea>
+        <textarea id="a-${a.kind}" placeholder="Что фиксируем: ${esc(a.captures)}" ${dis}>${esc(cur.content_md||'')}</textarea>
         <label>Исходник диаграммы (Mermaid: C4Context / C4Container / C4Deployment / erDiagram / flowchart)</label>
-        <textarea class="diagcode" id="d-${a.kind}" oninput="liveDiagram(this)" placeholder="${a.kind==='vision_c4'?'C4Context · Person · System · Rel · SHOW_LEGEND()':a.kind==='data_model'?'erDiagram · USER ||--o{ ORDER : places':a.kind==='deployment'?'C4Deployment · Deployment_Node → Container':'flowchart LR · A --> B'}">${esc(cur.diagram_code||'')}</textarea>
+        <textarea class="diagcode" id="d-${a.kind}" oninput="liveDiagram(this)" ${dis} placeholder="${a.kind==='vision_c4'?'C4Context · Person · System · Rel · SHOW_LEGEND()':a.kind==='data_model'?'erDiagram · USER ||--o{ ORDER : places':a.kind==='deployment'?'C4Deployment · Deployment_Node → Container':'flowchart LR · A --> B'}">${esc(cur.diagram_code||'')}</textarea>
       </div>
       <div>
-        <label style="margin-top:10px">Превью диаграммы (live)</label>
-        <div class="diag" id="dv-${a.kind}"></div>
+        <label style="margin-top:10px">Превью диаграммы (live)</label>        <div class="diag" id="dv-${a.kind}"></div>
         <div class="small mut" style="margin-top:6px">${esc(a.required_artifacts.join(' · '))}</div>
       </div>
     </div>
     <div class="btnrow">
-      <label style="margin:0;flex:1"><input id="u-${a.kind}" placeholder="Ссылка на исходник / файл (успех = ссылка)" value="${esc(cur.source_url||'')}"></label>
-      <button class="sec" onclick="aiDraft(${s.id},'${a.kind}',this)">✨ AI-черновик</button>
-      <button onclick="saveArt(${s.id},'${a.kind}')">Сохранить (v${(cur.version||1)+1})</button>
+      <label style="margin:0;flex:1"><input id="u-${a.kind}" placeholder="Ссылка на исходник / файл (успех = ссылка)" value="${esc(cur.source_url||'')}" ${dis}></label>
+      <button class="sec" onclick="aiDraft(${s.id},'${a.kind}',this)" ${dis}>✨ AI-черновик</button>
+      <button onclick="saveArt(${s.id},'${a.kind}')" ${dis}>Сохранить (v${(cur.version||1)+1})</button>
     </div></div>`;
   }).join('');
   // первичный рендер превью
@@ -421,7 +509,7 @@ function tabCheck(s){
     <div><div class="mut small">Обязательных не закрыто</div><div class="kpi" style="color:${runs?.mandatory_missing?'var(--bad)':'var(--ok)'}">${runs?.mandatory_missing??'—'}</div></div>
     <div style="flex:1"></div>
     <button class="cya" onclick="aiPrecheck(${s.id})">✨ AI-prediction (BR-29)</button>
-    <button onclick="submitCheck(${s.id})">Пройти self-check →</button>
+    <button onclick="submitCheck(${s.id})" ${canEditSvc(s)?'':'disabled title="Self-check проводится владельцем/архитектором или экспертом"'}>Пройти self-check →</button>
   </div><div id="ai-pre"></div></div>
   <div class="card"><table><tr><th>#</th><th>Пункт</th><th>Критерий «есть»</th><th>Вес</th><th>Оценка</th><th>Ссылка</th></tr>
   ${S.standard.checklist.map(it=>{
@@ -451,7 +539,8 @@ async function aiPrecheck(sid){
 }
 
 function tabReview(s){
-  const expertNote = S.user.role==='domain_expert' && s.review_status==='in_review';
+  const canSend = canEditSvc(s);                       // бэкенд: can_edit_service
+  const canDecide = !!s.can_decide_review && s.review_status==='in_review' && s.reviews.find(r=>r.status==='in_review');
   const open = s.reviews.find(r=>r.status==='in_review');
   $('#tabbody').innerHTML = `
   <div class="card vio" style="margin-bottom:14px"><h2 style="margin-top:0">Workflow ревью</h2>
@@ -459,12 +548,12 @@ function tabReview(s){
     <div class="btnrow">
       ${s.review_status==='in_review'
         ? `<span class="chip">Ревью идёт · запрошено <b>${esc(open?.requested_by||'')}</b></span>`
-        : `<button onclick="requestReview(${s.id})">Отправить на ревью</button>`}
-      ${expertNote?`
+        : `<button onclick="requestReview(${s.id})" ${canSend?'':'disabled title="Отправка на ревью: владелец/архитектор или product-группа"'}>Отправить на ревью</button>`}
+      ${canDecide?`
         <button class="btn-ok" onclick="decide(${open.id},'approved')">✓ Approved</button>
         <button class="btn-bad" onclick="decide(${open.id},'changes_requested')">✗ Changes requested</button>`:''}
     </div>
-    ${expertNote?`<textarea class="sm" id="rv-comment" placeholder="Комментарий решения (необязательно)"></textarea>`:''}
+    ${canDecide?`<textarea class="sm" id="rv-comment" placeholder="Комментарий решения (необязательно)"></textarea>`:''}
   </div>
   <div class="card"><table><tr><th>#</th><th>Запрошено</th><th>Ревьюер</th><th>Решение</th><th>Комментарий</th></tr>
   ${s.reviews.map(r=>`<tr><td>${r.id}</td>
@@ -546,7 +635,7 @@ const PRIO_BADGE = {P0:'b-changes_requested', P1:'b-in_review', P2:'b-mandatory'
 const RISK_BADGE = {Critical:'b-changes_requested', High:'b-in_review', Medium:'b-mandatory', Low:'b-draft'};
 function debtRow(d, withService){
   return `<tr>
-    <td><span class="badge ${d.dtype==='AD'?'b-changes_requested':'b-mandatory'}">${d.dtype}</span>
+    <td style="white-space:nowrap"><span class="badge ${d.dtype==='AD'?'b-changes_requested':'b-mandatory'}">${d.dtype}</span>
         <b class="small">${esc(d.debt_id)}</b></td>
     <td><b>${esc(d.title)}</b>${withService&&d.service_code?`<div class="small mut">${esc(d.service_code)} · ${esc(d.service_name||'')}</div>`:''}</td>
     <td><span class="badge ${RISK_BADGE[d.risk]||'b-draft'}">${esc(d.risk)}</span><div class="small mut">Ds ${d.probability}×${d.damage}=${d.ds}</div></td>
@@ -666,7 +755,7 @@ function tabFitness(s){
   $('#tabbody').innerHTML = `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h2 style="margin-top:0">Fitness functions — автопроверка правил архитектуры (BR-41…42)</h2>
-      <button onclick="runFitness(${s.id})">▶ Прогнать проверки</button></div>
+      <button onclick="runFitness(${s.id})" ${canEditSvc(s)?'':'disabled title="Нет прав на изменение сервиса"'}>▶ Прогнать проверки</button></div>
     <p class="small mut">Правила — проверяемые утверждения стандарта (pageId=894079737): исходники диаграмм,
     3+ эндпоинта API, NFR в цифрах, ADR-001…005, docker compose. blocker проваливает прогон, warning — нет.</p>
     ${last?`<div class="btnrow" style="margin:10px 0">
@@ -709,11 +798,12 @@ async function downloadCi(sid){
 const METRIC_RU = {rps:'RPS (пиковый)', p95_ms:'Время ответа p95, ms', sla_pct:'SLA, %',
                    rto_h:'RTO, ч', rpo_min:'RPO, мин'};
 function tabNfr(s){
+  const ed = canEditSvc(s);
   const nfr = s.nfr || {metrics:[]};
   $('#tabbody').innerHTML = `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h2 style="margin-top:0">NFR-валидация: цель vs факт (BR-51…53)</h2>
-      <button onclick="nfrExtract(${s.id})">⇣ Извлечь цели из артефакта NFR</button></div>
+      <button onclick="nfrExtract(${s.id})" ${ed?'':'disabled title="Нет прав на изменение сервиса"'}>⇣ Извлечь цели из артефакта NFR</button></div>
     <p class="small mut">Цели (RPS, p95, SLA, RTO, RPO) извлекаются из артефакта «NFR &amp; Security»;
     факт вносится по данным нагрузочного стенда / мониторинга. breach — факт хуже цели.</p>
     <div class="btnrow" style="margin:10px 0">
@@ -724,10 +814,10 @@ function tabNfr(s){
       ${nfr.metrics.map(m=>`<tr>
         <td><b>${METRIC_RU[m.metric]||esc(m.metric)}</b></td>
         <td>${m.target_value!=null?`<code>${m.target_value}</code>`:'—'}${m.target_note?`<div class="small mut">${esc(m.target_note)}</div>`:''}</td>
-        <td><input id="nfr-act-${m.id}" type="number" step="any" value="${m.actual_value??''}" style="width:110px" placeholder="факт"></td>
+        <td><input id="nfr-act-${m.id}" type="number" step="any" value="${m.actual_value??''}" style="width:110px" placeholder="факт" ${ed?'':'disabled'}></td>
         <td><span class="badge ${VERDICT_BADGE[m.status]||'b-draft'}">${m.status}</span><div class="small mut">${esc(m.detail||'')}</div></td>
         <td class="small mut">${esc(m.source||'—')}</td>
-        <td><button class="sec" onclick="nfrSave(${m.id})">Сохранить</button></td></tr>`).join('')}</table>`
+        <td><button class="sec" onclick="nfrSave(${m.id})" ${ed?'':'disabled'}>Сохранить</button></td></tr>`).join('')}</table>`
       :'<p class="mut">Метрик нет — извлеките цели из артефакта NFR или заполните артефакт цифрами.</p>'}
   </div>`;
 }
@@ -759,6 +849,7 @@ function artTitle(kind){
 }
 
 function tabReqs(s){
+  const ed = canEditSvc(s);
   const rs = s.requirements || [];
   const nF = rs.filter(r => r.req_type === 'func').length, nN = rs.length - nF;
   const uncovered = rs.filter(r => !(r.covered_by || []).length).length;
@@ -772,24 +863,24 @@ function tabReqs(s){
     NFR profile, а покрытие (упоминание ФТ-N в артефактах) показывает, что ни одно
     требование не потерялось.</p>
     <div class="btnrow">
-      <button class="cya" onclick="reqNfrDraft(${s.id}, this)">⇥ Сгенерировать NFR profile из НФТ</button>
+      <button class="cya" onclick="reqNfrDraft(${s.id}, this)" ${ed?'':'disabled title="Нет прав на изменение сервиса"'}>⇥ Сгенерировать NFR profile из НФТ</button>
       <span class="small mut">${nF} ФТ · ${nN} НФТ${uncovered?` · <b style="color:var(--bad)">не покрыто: ${uncovered}</b>`:''}</span>
     </div>
-    <div style="margin:12px 0 6px"><button class="sec" onclick="reqToggleParse()">🧠 Вставить документ требований</button></div>
+    <div style="margin:12px 0 6px"><button class="sec" onclick="reqToggleParse()" ${ed?'':'disabled'}>🧠 Вставить документ требований</button></div>
     <div id="req-parse" style="display:none">
       <textarea id="req-doc" rows="8" style="width:100%"
         placeholder="Вставьте текст ФТ/НФТ из Confluence, Jira или документа…"></textarea>
-      <div class="btnrow"><button onclick="reqParse(${s.id})">🧠 Разобрать документ</button>
+      <div class="btnrow"><button onclick="reqParse(${s.id})" ${ed?'':'disabled'}>🧠 Разобрать документ</button>
       <span class="small mut" id="req-parse-note"></span></div>
       <div id="req-preview"></div>
     </div>
     <label style="margin-top:12px">Добавить вручную</label>
     <div class="grid g2">
-      <select id="req-type"><option value="func">ФТ — функция</option><option value="nonfunc">НФТ — качество</option></select>
-      <input id="req-src" placeholder="Источник: Confluence / Jira (ссылка)">
+      <select id="req-type" ${ed?'':'disabled'}><option value="func">ФТ — функция</option><option value="nonfunc">НФТ — качество</option></select>
+      <input id="req-src" placeholder="Источник: Confluence / Jira (ссылка)" ${ed?'':'disabled'}>
     </div>
-    <textarea id="req-text" rows="2" style="width:100%;margin-top:6px" placeholder="Текст требования"></textarea>
-    <div class="btnrow"><button onclick="reqAdd(${s.id})">＋ Добавить требование</button></div>
+    <textarea id="req-text" rows="2" style="width:100%;margin-top:6px" placeholder="Текст требования" ${ed?'':'disabled'}></textarea>
+    <div class="btnrow"><button onclick="reqAdd(${s.id})" ${ed?'':'disabled title="Нет прав на изменение сервиса"'}>＋ Добавить требование</button></div>
   </div>
   <div class="card">
     <h2 style="margin-top:0">Реестр требований</h2>
@@ -798,13 +889,13 @@ function tabReqs(s){
       <td><span class="badge ${REQ_TYPE_BADGE[r.req_type]}">${REQ_TYPE_RU[r.req_type]}</span>
           <div class="small mut" style="margin-top:2px"><b>${esc(r.ext_id||'')}</b>${r.source_url?`<br><a class="lnk" href="${esc(r.source_url)}" target="_blank">источник ↗</a>`:''}</div></td>
       <td style="max-width:340px">${esc(r.text)}</td>
-      <td><select onchange="reqStatus(${r.id}, this.value)">
+      <td><select onchange="reqStatus(${r.id}, this.value)" ${ed?'':'disabled'}>
         ${['new','in_work','covered'].map(st => `<option value="${st}" ${st===r.status?'selected':''}>${REQ_STATUS_RU[st]}</option>`).join('')}
       </select></td>
       <td>${(r.covered_by||[]).length
         ? r.covered_by.map(k => `<span class="badge b-approved" title="${esc(artTitle(k))}">${esc(k)}</span>`).join(' ')
         : '<span class="badge b-N">не покрыто</span>'}</td>
-      <td><button class="sec" onclick="reqDel(${r.id}, ${s.id})" title="Удалить">✕</button></td></tr>`).join('')}
+      <td><button class="sec" onclick="reqDel(${r.id}, ${s.id})" title="Удалить" ${ed?'':'disabled'}>✕</button></td></tr>`).join('')}
     </table>` : '<p class="mut">Требований пока нет — вставьте документ или добавьте вручную. Затем откройте «Артефакты»: AI-черновик учтёт требования.</p>'}
   </div></div>`;
 }
@@ -916,6 +1007,7 @@ const c4Edge = id => c4M() && (c4M().edges || []).find(e => e.id === id);
 async function tabDesign(s){
   c4FlushSave();                      // недосейвенный вид предыдущего сервиса уходит под своим {sid, view}
   DSGN.sid = s.id; DSGN.sel = null; DSGN.selType = null; c4CancelLink();
+  DSGN.readonly = !canEditSvc(s);     // viewer/infosec/чужой сервис: без правок и автосейва
   const r = await api(`/services/${s.id}/c4`).catch(() => ({models: {}}));
   DSGN.models = r.models || {};
   for(const v of Object.keys(C4_VIEWS))
@@ -927,20 +1019,23 @@ async function tabDesign(s){
     <div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">
       <div><b>Проектирование архитектуры — C4</b>
         <div class="small mut">Сценарий 1 — рисуйте вручную палитрой слева. Сценарий 2 —
-        «AI-структура» спроектирует модель из требований и фактов сервиса, затем правьте её же редактором.
+        «AI-структура» спроектирует модель из требований и фактов сервиса (для контейнеров —
+        в согласии с уже сохранённой L1), затем правьте её же редактором.
         Модель хранится как JSON; «Экспорт в Mermaid» кладёт C4-исходник в артефакт Vision для self-check.</div></div>
       <div class="btnrow">
-        <button onclick="c4AI('${DSGN.view}', this)">🧠 AI-структура</button>
+        <button onclick="c4AI('${DSGN.view}', this)" ${DSGN.readonly?'disabled title="Нет прав на изменение сервиса"':''}>🧠 AI-структура</button>
         <button class="sec" onclick="c4Preview(this)">👁 Mermaid-предпросмотр</button>
-        <button class="cya" onclick="c4Export(this)">⇥ Экспорт в артефакт Vision</button>
+        <button class="cya" onclick="c4Export(this)" ${DSGN.readonly?'disabled title="Нет прав на изменение сервиса"':''}>⇥ Экспорт в артефакт Vision</button>
       </div>
+      ${DSGN.readonly?'<p class="small mut" style="margin-top:6px">🔒 Режим «только просмотр»: правки модели недоступны с вашим доступом к сервису.</p>':''}
     </div>
   </div>
   <div class="design-shell">
     <div class="c4-side">
       <b class="small">ПАЛИТРА ЭЛЕМЕНТОВ</b>
+      ${DSGN.readonly?'<span class="small mut">просмотр</span>':''}
       <div class="c4-palette">
-        ${C4_TYPES.map(x => `<button onclick="c4Add('${x.t}')" title="Добавить: ${x.ru}">${x.icon} ${x.ru}</button>`).join('')}
+        ${C4_TYPES.map(x => `<button onclick="c4Add('${x.t}')" title="Добавить: ${x.ru}" ${DSGN.readonly?'disabled':''}>${x.icon} ${x.ru}</button>`).join('')}
       </div>
       <div class="btnrow">
         <button class="sec" id="c4-linkbtn" onclick="c4LinkMode()">🔗 Связать</button>
@@ -1155,6 +1250,7 @@ function c4Status(note){
 }
 
 function c4SaveSoon(){
+  if(DSGN.readonly) return;           // нет прав на сервис — не тягаем 403 при случайных правках
   clearTimeout(DSGN.saveT);
   // снимок фиксируется сейчас: таймер обязан сохранить тот {sid, view, данные}, при которых
   // была правка, а не те, что станут актуальными через 1.2 с (иначе правка молча теряется)
@@ -1207,14 +1303,26 @@ async function c4Preview(btn){
   }catch(e){ toast(esc(e.message), true); }
 }
 
+function _toastExport(r){
+  const w = (r.validation?.warnings || []).join(' · ');
+  toast((r.updated
+    ? `Mermaid C4-исходник (${r.code_len} симв.) записан в артефакт <b>Vision</b> — «Диаграммы» и self-check увидят L1/L2`
+    : 'Модели пусты — исходник диаграммы очищен')
+    + (w ? `<br><span class="small mut">Предупреждения: ${esc(w)}</span>` : ''));
+}
+
 async function c4Export(btn){
   btn.disabled = true; const old = btn.textContent; btn.textContent = '⏳ Экспортирую…';
   try{
-    const r = await api(`/services/${DSGN.sid}/c4/export`, {method:'POST'});
-    toast(r.updated
-      ? `Mermaid C4-исходник (${r.code_len} симв.) записан в артефакт <b>Vision</b> — «Диаграммы» и self-check увидят L1/L2`
-      : 'Модели пусты — исходник диаграммы очищен');
-  }catch(e){ toast(esc(e.message), true); }
+    _toastExport(await api(`/services/${DSGN.sid}/c4/export`, {method:'POST'}));
+  }catch(e){
+    if(String(e.message).startsWith('Валидация')
+       && confirm(e.message + '\n\nЭкспортировать всё равно?')){
+      try{ _toastExport(await api(`/services/${DSGN.sid}/c4/export`,
+                                   {method:'POST', body: JSON.stringify({force:true})})); }
+      catch(e2){ toast(esc(e2.message), true); }
+    } else toast(esc(e.message), true);
+  }
   btn.disabled = false; btn.textContent = old;
 }
 
@@ -1603,19 +1711,21 @@ async function grpCreate(){
 
 /* ---------- admin / integrations ---------- */
 async function viewAdmin(){
-  const can = ['domain_expert','admin'].includes(S.user.role);
+  const can = ['domain_expert','admin'].includes(S.user.role);        // integration.import
+  const canAudit = ['domain_expert','admin','infosec'].includes(S.user.role);  // audit.view
+  const isAdmin = S.user.role === 'admin';
   $('#view').innerHTML = `<h1>Интеграции</h1>
   <div class="grid g2" style="margin-top:14px">
     <div class="card vio"><h2 style="margin-top:0">Backstage Catalog (BR-21)</h2>
       <p class="small mut">Импорт сервисов из catalog-info.yaml (GitLab autodiscovery). MVP — mock-коннектор с dry-run.</p>
-      <div class="btnrow"><button class="cya" onclick="importBackstage(true)" ${can?'':'disabled'}>Dry-run импорт</button>
-      <button onclick="importBackstage(false)" ${can?'':'disabled'}>Импортировать</button></div>
+      <div class="btnrow"><button class="cya" onclick="importBackstage(true)" ${can?'':'disabled title="Нужна роль domain_expert+"'}>Dry-run импорт</button>
+      <button onclick="importBackstage(false)" ${can?'':'disabled title="Нужна роль domain_expert+"'}>Импортировать</button></div>
       <div id="imp-res"></div></div>
     <div class="card"><h2 style="margin-top:0">CMDB (BR-20/22)</h2>
       <p class="small mut">DataGerry — REST API + ObjectTypes (контур кибербезопасности). Матрица владения полями:
       ИС → архитектурные атрибуты, CMDB → операционные (CI, health, алерты). Подключение — после финализации выбора CMDB.</p>
       <span class="badge b-draft">запланировано</span></div>
-    <div class="card"><h2 style="margin-top:0">AI-Buddy: корпоративная LLM</h2>
+    ${isAdmin?`<div class="card"><h2 style="margin-top:0">AI-Buddy: корпоративная LLM</h2>
       <p class="small mut">Подключение LLM для AI-ассистента (BR-48…50) и будущих AI-сценариев (BR-27…29).
       OpenAI-совместимый контракт: <code>{URL}/chat/completions</code>. Токен хранится в настройках
       платформы и никогда не возвращается в UI целиком. «Проверить связь» можно до сохранения —
@@ -1632,7 +1742,7 @@ async function viewAdmin(){
         <datalist id="llm-models"></datalist>
       </div>
       <div id="llm-res" style="margin-top:8px"></div>
-    </div>
+    </div>`:''}
     <div class="card"><h2 style="margin-top:0">Confluence: реестр техдолга (BR-54…56)</h2>
       <p class="small mut">Двусторонняя синхронизация со страницей «Реестр технического долга»
       (pageId=915912594): экспорт XHTML (storage format) и импорт markdown-таблицы.
@@ -1644,11 +1754,11 @@ async function viewAdmin(){
       <div class="btnrow"><button class="sec" onclick="cfImport()" ${['domain_expert','admin'].includes(S.user.role)?'':'disabled'}>Импортировать долги</button></div>
     </div>
     <div class="card"><h2 style="margin-top:0">Журнал аудита</h2>
-      <p class="small mut">Все действия фиксируются (BR-33). Просмотр: expert/admin.</p>
-      <div class="btnrow">${can?'<button class="sec" onclick="showAudit()">Открыть журнал</button>':'<span class="mut small">нужна роль domain_expert+</span>'}</div>
+      <p class="small mut">Все действия фиксируются (BR-33). Просмотр: expert/admin/InfoSec.</p>
+      <div class="btnrow">${canAudit?'<button class="sec" onclick="showAudit()">Открыть журнал</button>':`<span class="mut small">нужна роль domain_expert+ или InfoSec</span>`}</div>
       <div id="audit-res"></div></div>
   </div>`;
-  if (S.user.role === 'admin') renderLlm();
+  if (isAdmin) renderLlm();
 }
 async function renderLlm(){
   try{
@@ -1751,8 +1861,11 @@ function openModal(title, html){
   m.innerHTML = `<div class="card vio" style="width:min(560px,92vw);max-height:86vh;overflow:auto"><h2>${esc(title)}</h2>${html}</div>`;
   m.addEventListener('click', e=>{ if(e.target===m) m.remove(); });
   document.body.append(m);
+  const f = m.querySelector('input:not([disabled]),textarea,select');
+  if(f) f.focus();
 }
 const closeModal = () => $('#modal')?.remove();
+document.addEventListener('keydown', e => { if(e.key === 'Escape') closeModal(); });
 window.addEventListener('hashchange', render);
 // восстановление сессии по сохранённому токену
 (async () => {

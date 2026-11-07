@@ -1,5 +1,6 @@
 """REST API MVP DeepArch (BR-01…13 ядро + BR-14…27 фундамент + RBAC)."""
 import json
+import re
 import secrets
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Response
@@ -8,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from . import ai, factory, fitness, integrations, kb, llm, nfr, reqs
 from . import c4 as c4mod
 from .auth import current_user, verify_password
-from .db import exec, now, q, q1
+from .db import exec, get_conn, now, q, q1
 from .debts import gen_debt_id
 from .roles import can_edit_service, has_global, in_committee, service_scope, user_groups
 from .seed import seed
@@ -81,10 +82,11 @@ def me(user=Depends(current_user)):
 # ---------- реестр сервисов (BR-01) + скоуп-доступ ----------
 
 @router.get("/services")
-def list_services(user=Depends(current_user)):
-    rows = q("""SELECT s.*,
+def list_services(include_archived: int = None, user=Depends(current_user)):
+    """По умолчанию архив (lifecycle='decommissioned') скрыт; include_archived=1 показывает его."""
+    rows = q(f"""SELECT s.*,
                 (SELECT MAX(score_pct) FROM checklist_runs c WHERE c.service_id=s.id) AS last_score
-                FROM services s ORDER BY s.name""")
+                FROM services s {'' if include_archived else "WHERE s.lifecycle != 'decommissioned'"} ORDER BY s.name""")
     for r in rows:
         r["mandatory_artifacts"] = _mandatory_kinds(r["project_type"])
     return rows
@@ -122,12 +124,39 @@ def _mandatory_kinds(project_type):
     return [k for k, v in pt.get("matrix", {}).items() if v == "mandatory"]
 
 
+def _next_steps(svc) -> list[str]:
+    """Живые Next Steps для карточки сервиса: что реально мешает готовности к ревью
+    (в отличие от статического списка factory при создании)."""
+    arts = {a["kind"]: a for a in
+            q("SELECT kind, content_md FROM artifacts WHERE service_id=?", (svc["id"],))}
+    steps = []
+    missing = [k for k in _mandatory_kinds(svc["project_type"])
+               if not (arts.get(k, {}).get("content_md") or "").strip()]
+    if missing:
+        titles = [next((a["title"] for a in ARTIFACT_KINDS if a["kind"] == k), k)
+                  for k in missing]
+        steps.append("Заполнить артефакты: " + ", ".join(titles))
+    if not q1("SELECT id FROM c4_models WHERE service_id=? LIMIT 1", (svc["id"],)):
+        steps.append("Нарисовать C4-модель (контекст/контейнеры) и экспортировать в Architecture Vision")
+    if not q1("SELECT id FROM checklist_runs WHERE service_id=? AND answers != '[]' "
+              "ORDER BY created_at DESC LIMIT 1", (svc["id"],)):
+        steps.append("Пройти self-check (10 пунктов Е/Ч/Н)")
+    if svc["review_status"] == "draft":
+        steps.append("Отправить сервис на ревью эксперту домена")
+    elif svc["review_status"] == "in_review":
+        steps.append("Ожидается решение ревьюера")
+    if not steps:
+        steps.append("Готов к ревью — обязательные артефакты, self-check и ревью закрыты")
+    return steps
+
+
 @router.get("/services/{sid}")
 def get_service(sid: int, user=Depends(current_user)):
     svc = q1("SELECT * FROM services WHERE id=?", (sid,))
     if not svc:
         raise HTTPException(404, "Сервис не найден")
     svc["my_scope"] = service_scope(user, svc)   # full / team / none — для UI
+    svc["can_decide_review"] = has_global(user, "review.decide") or in_committee(user["username"])
     svc["mandatory_artifacts"] = _mandatory_kinds(svc["project_type"])
     svc["debts"] = [dict(r, ds=r["probability"] * r["damage"]) for r in
                     q("SELECT * FROM tech_debts WHERE service_id=? ORDER BY id DESC", (sid,))]
@@ -147,6 +176,7 @@ def get_service(sid: int, user=Depends(current_user)):
     run = q1("SELECT id,passed,failed,warned,created_by,created_at FROM fitness_runs"
              " WHERE service_id=? ORDER BY created_at DESC LIMIT 1", (sid,))
     svc["fitness_last"] = dict(run) if run else None     # MVP2 BR-42
+    svc["next_steps"] = _next_steps(svc)                 # живой список «что осталось»
     return svc
 
 
@@ -169,6 +199,51 @@ def update_service(sid: int, body=Body(...), user=Depends(current_user)):
         exec(f"UPDATE services SET {', '.join(sets)}, updated_at=? WHERE id=?", params)
         audit(user, "update_service", f"service:{svc['code']}", ", ".join(sets))
     return {"ok": True}
+
+
+# дочерние таблицы сервиса (FK REFERENCES services без ON DELETE CASCADE) —
+# порядок не важен, но дочерние только одного уровня (вложенных FK нет)
+_SERVICE_CHILD_TABLES = (
+    "artifacts", "c4_models", "checklist_runs", "fitness_runs", "nfr_metrics",
+    "requirements", "reviews", "service_components", "service_grants", "tech_debts",
+)
+
+
+@router.delete("/services/{sid}")
+def delete_service(sid: int, body=Body(default={}), user=Depends(current_user)):
+    """Жёсткое удаление сервиса: только admin, с подтверждением кодом сервиса.
+
+    Необратимо удаляет карточку и все дочерние данные (артефакты, ревью, техдолг…);
+    история сохраняется только записью в audit_log. Для обратимого вывода из
+    эксплуатации используйте PATCH lifecycle='decommissioned'.
+    """
+    if user["role"] != "admin":
+        raise HTTPException(403, "Удаление сервиса доступно только admin "
+                                 "(для вывода из эксплуатации используйте lifecycle)")
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if body.get("confirm") != svc["code"]:
+        raise HTTPException(400, f"Подтвердите удаление: передайте confirm='{svc['code']}'")
+    if svc["review_status"] == "in_review":
+        raise HTTPException(409, "Сервис на ревью — сначала завершите или отзовите ревью")
+
+    conn = get_conn()
+    try:
+        counts = {}
+        for t in _SERVICE_CHILD_TABLES:
+            cur = conn.execute(f"DELETE FROM {t} WHERE service_id=?", (sid,))
+            counts[t] = cur.rowcount
+        cur = conn.execute("DELETE FROM services WHERE id=?", (sid,))
+        if cur.rowcount != 1:
+            raise RuntimeError("service row not deleted")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    audit(user, "service_delete", f"service:{svc['code']}",
+          "deleted rows: " + ", ".join(f"{t}:{n}" for t, n in counts.items() if n))
+    return {"ok": True, "deleted": counts}
 
 
 # ---------- артефакты (BR-02) ----------
@@ -317,6 +392,15 @@ def attach_component(sid: int, body=Body(...), user=Depends(current_user)):
 
 
 # ---------- AI (BR-27…37) ----------
+
+@router.post("/ai/service-extract")
+def ai_service_extract(body=Body(...), user=Depends(current_user)):
+    """Design Session: из свободного документа → черновик карточки сервиса + требования.
+    Advisory (BR-33): результат только предзаполняет форму создания, решение за человеком."""
+    r = ai.extract_service(body.get("text") or "", model=(body.get("model") or "").strip())
+    audit(user, "ai_service_extract", "-", f"provider:{r['provider']} reqs:{len(r['draft'].get('requirements') or [])}")
+    return r
+
 
 @router.post("/ai/draft")
 def ai_draft(body=Body(...), user=Depends(current_user)):
@@ -501,18 +585,27 @@ def c4_ai(sid: int, view: str, body=Body(None), user=Depends(current_user)):
 
 @router.post("/services/{sid}/c4/export")
 def c4_export(sid: int, body=Body(None), user=Depends(current_user)):
-    """Экспорт обеих C4-моделей в Mermaid-исходник артефакта vision_c4."""
+    """Экспорт обеих C4-моделей в Mermaid-исходник артефакта vision_c4.
+    Перед записью — валидация (409 при блокирующих проблемах; force обходит осознанно)."""
     svc = q1("SELECT * FROM services WHERE id=?", (sid,))
     if not svc:
         raise HTTPException(404, "Сервис не найден")
     if not can_edit_service(user, svc):
         raise HTTPException(403, "Нет прав на этот сервис")
+    report = c4mod.validate_models(sid)
     if body and body.get("dry_run"):
-        return {"ok": True, "code": c4mod.build_code(sid)}
+        return {"ok": True, "code": c4mod.build_code(sid), "validation": report}
+    if report["blockers"] and not (body or {}).get("force"):
+        audit(user, "c4_export_blocked", f"service:{sid}", "; ".join(report["blockers"]))
+        raise HTTPException(409, "Валидация не пропускает экспорт: "
+                            + "; ".join(report["blockers"]) + " (можно экспортировать принудительно)")
     r = c4mod.export_to_artifact(sid, user["username"])
     if not r.get("ok"):
         raise HTTPException(404, r.get("note", "не найдено"))
-    audit(user, "c4_export", f"service:{sid}", f"updated:{r.get('updated')} len:{r.get('code_len', 0)}")
+    r["validation"] = report
+    audit(user, "c4_export", f"service:{sid}",
+          f"updated:{r.get('updated')} len:{r.get('code_len', 0)}"
+          + (f" forced ({'|'.join(report['blockers'])})" if report["blockers"] else ""))
     return r
 
 
@@ -548,20 +641,63 @@ def catalog_export(sid: int, user=Depends(current_user)):
 
 _KIND_TITLES = {a["kind"]: a["title"] for a in ARTIFACT_KINDS}
 
+# человекочитаемые формулировки событий журнала для дашборда (advisory-подписи)
+_ACTION_LABELS = {
+    "login": "Вход в систему", "logout": "Выход",
+    "create_service": "Создан сервис", "update_service": "Изменена карточка сервиса",
+    "factory_scaffold": "Сгенерирован стартовый пакет",
+    "save_artifact": "Обновлён артефакт", "artifacts_scaffold": "Заполнены скелеты артефактов",
+    "c4_save": "Сохранена C4-модель", "c4_export": "Экспорт C4 в артефакт",
+    "c4_export_blocked": "Экспорт C4 заблокирован валидацией",
+    "self_check": "Пройден self-check", "ai_precheck": "AI-предпроверка self-check",
+    "ai_draft": "AI-черновик артефакта", "ai_service_extract": "Извлечение карточки из документа",
+    "requirement_add": "Добавлено требование", "requirement_update": "Изменено требование",
+    "requirement_delete": "Удалено требование", "requirements_parse": "Разобран документ требований",
+    "requirements_import": "Импортированы требования", "nfr_from_requirements": "Черновик NFR из требований",
+    "nfr_update": "Обновлён NFR-профиль", "request_review": "Запрошено ревью",
+    "review_decision": "Решение по ревью", "debt_register": "Зарегистрирован техдолг",
+    "debt_update": "Обновлён техдолг", "debt_status": "Изменён статус техдолга",
+    "fitness_run": "Запущены fitness-проверки", "attach_component": "Подключён компонент",
+    "create_component": "Создан компонент", "confluence_export": "Экспорт в Confluence",
+    "confluence_import": "Импорт из Confluence", "backstage_import": "Импорт из Backstage",
+    "llm_config": "Настройка LLM", "llm_test": "Проверка LLM",
+    "set_role": "Изменена роль", "create_group": "Создана группа",
+    "group_add_member": "Добавлен участник группы", "group_remove_member": "Удалён участник группы",
+    "group_grant_service": "Группе выдан доступ к сервису", "group_revoke_service": "У группы отозван доступ",
+}
+
+
+def _human_activity(rows: list[dict]) -> list[dict]:
+    """Дашборд-подача журнала: действие словами, entity «service:4/container» → «MPR /container».
+    Исходные поля сохраняются (additive)."""
+    codes = {r["id"]: r["code"] for r in q("SELECT id, code FROM services")}
+    out = []
+    for a in rows:
+        m = re.match(r"service:(\d+)(/.*)?", a["entity"] or "")
+        entity = a["entity"]
+        if m:
+            code = codes.get(int(m.group(1)), f"#svc-{m.group(1)}")
+            entity = code + (m.group(2) or "")
+        out.append({**a, "action_label": _ACTION_LABELS.get(a["action"], a["action"]),
+                    "entity_label": entity})
+    return out
+
 
 @router.get("/dashboard")
 def dashboard(user=Depends(current_user)):
     """Агрегаты главной страницы. Все ключи аддитивны: прежние потребители не ломаются."""
-    total = q1("SELECT COUNT(*) AS n FROM services")["n"]
-    by_status = q("SELECT review_status, COUNT(*) AS n FROM services GROUP BY review_status")
+    total = q1("SELECT COUNT(*) AS n FROM services WHERE lifecycle != 'decommissioned'")["n"]
+    archived = q1("SELECT COUNT(*) AS n FROM services WHERE lifecycle = 'decommissioned'")["n"]
+    by_status = q("SELECT review_status, COUNT(*) AS n FROM services "
+                  "WHERE lifecycle != 'decommissioned' GROUP BY review_status")
     latest = q("""SELECT s.id, s.code, s.name, s.review_status,
                   (SELECT score_pct FROM checklist_runs c WHERE c.service_id=s.id ORDER BY created_at DESC LIMIT 1) AS score
-                  FROM services s ORDER BY s.updated_at DESC LIMIT 8""")
+                  FROM services s WHERE s.lifecycle != 'decommissioned' ORDER BY s.updated_at DESC LIMIT 8""")
     comp_usage = q("""SELECT c.name, c.status, COUNT(sc.service_id) AS used_by
                        FROM components c LEFT JOIN service_components sc ON sc.component_id=c.id
                        GROUP BY c.id ORDER BY used_by DESC""")
 
-    svcs = q("SELECT * FROM services ORDER BY updated_at DESC")
+    svcs = q("SELECT * FROM services WHERE lifecycle != 'decommissioned' ORDER BY updated_at DESC")
     # заполненные артефакты (не пустые) по сервисам
     filled = {}
     for a in q("SELECT service_id, kind FROM artifacts WHERE content_md != ''"):
@@ -580,26 +716,29 @@ def dashboard(user=Depends(current_user)):
 
     # --- R1: готовность к ревью — составляющие отдельно, без «единой выдуманной цифры» ---
     def _hint(s, missing, ch, fit):
-        # приоритет подсказки: заполнение → self-check → красный фитнес → статусы ревью
+        # приоритет подсказки: заполнение → self-check → красный фитнес → статусы ревью;
+        # вместе с текстом — целевая вкладка сервиса для клика с дашборда
         if missing:
-            return "Заполнить: " + ", ".join(_KIND_TITLES.get(k, k) for k in missing)
+            return ("Заполнить: " + ", ".join(_KIND_TITLES.get(k, k) for k in missing),
+                    "artifacts")
         if not ch or ch["mandatory_missing"] > 0:
-            return "Пройти self-check"
+            return "Пройти self-check", "check"
         if fit and fit["failed"]:
-            return f"Устранить красные фитнес-проверки ({fit['failed']})"
+            return f"Устранить красные фитнес-проверки ({fit['failed']})", "fitness"
         if s["review_status"] == "in_review":
-            return "Ждёт решения по ревью"
+            return "Ждёт решения по ревью", "review"
         if s["review_status"] == "changes_requested":
-            return "Доработать по замечаниям"
+            return "Доработать по замечаниям", "review"
         if s["review_status"] == "approved":
-            return "Согласовано"
-        return "Готов к запросу ревью"
+            return "Согласовано", "review"
+        return "Готов к запросу ревью", "review"
 
     readiness = []
     for s in svcs:
         mandatory = _mandatory_kinds(s["project_type"])
         missing = [k for k in mandatory if k not in filled.get(s["id"], set())]
         ch, fit, deb = last_check.get(s["id"]), last_fit.get(s["id"]), open_debts.get(s["id"], {})
+        hint, hint_tab = _hint(s, missing, ch, fit)
         readiness.append({
             "id": s["id"], "code": s["code"], "name": s["name"],
             "review_status": s["review_status"],
@@ -608,7 +747,7 @@ def dashboard(user=Depends(current_user)):
             "self_check": ch["score_pct"] if ch else None,
             "fitness": ({"failed": fit["failed"], "warned": fit["warned"]} if fit else None),
             "debts_open": deb.get("n", 0), "debts_p0": deb.get("p0", 0), "debts_p1": deb.get("p1", 0),
-            "hint": _hint(s, missing, ch, fit),
+            "hint": hint, "hint_link": f"/service/{s['id']}/{hint_tab}",
         })
     # сверху — сервисы с незакрытыми обязательными артефактами, затем с худшим self-check
     readiness.sort(key=lambda r: (-len(r["mandatory_missing"]),
@@ -648,17 +787,19 @@ def dashboard(user=Depends(current_user)):
     # --- R5: покрытие процессом ---
     # «без self-check» = нет ни одного отвеченного прогона (create_service вставляет пустой run)
     coverage = {
-        "no_requirements": q("SELECT code FROM services WHERE id NOT IN (SELECT DISTINCT service_id FROM requirements)"),
-        "no_c4": q("SELECT code FROM services WHERE id NOT IN (SELECT DISTINCT service_id FROM c4_models)"),
-        "no_checklist": q("SELECT code FROM services WHERE id NOT IN "
+        "no_requirements": q("SELECT id, code FROM services WHERE lifecycle != 'decommissioned' AND id NOT IN (SELECT DISTINCT service_id FROM requirements)"),
+        "no_c4": q("SELECT id, code FROM services WHERE lifecycle != 'decommissioned' AND id NOT IN (SELECT DISTINCT service_id FROM c4_models)"),
+        "no_checklist": q("SELECT id, code FROM services WHERE lifecycle != 'decommissioned' AND id NOT IN "
                           "(SELECT DISTINCT service_id FROM checklist_runs WHERE answers != '[]')"),
     }
 
     # --- R6: активность — только тем, у кого есть право на журнал аудита ---
     can_audit = has_global(user, "audit.view") or user["role"] == "admin"
-    activity = q("SELECT ts, user, action, entity, detail FROM audit_log ORDER BY ts DESC LIMIT 12") if can_audit else []
+    activity = _human_activity(
+        q("SELECT ts, user, action, entity, detail FROM audit_log ORDER BY ts DESC LIMIT 12")
+    ) if can_audit else []
 
-    return {"total_services": total, "by_review_status": by_status, "recent": latest,
+    return {"total_services": total, "archived_services": archived, "by_review_status": by_status, "recent": latest,
             "component_usage": comp_usage, "standard_ref": STANDARD_REF,
             "readiness": readiness, "my_tasks": my_tasks,
             "debt_by_priority": debt_by_priority, "debt_top": debt_top,

@@ -6,10 +6,13 @@ MVP: provider="mock" — детерминированные эвристики �
 (см. Confluence: "SDLC Агент соответствия архитектурным стандартам" pageId=915912563).
 Все результаты advisory-only, с evidence-ссылками (BR-32), решение за человеком (BR-33).
 """
-from . import llm
+import json
+import re
+
+from . import llm, reqs
 from .db import q, q1
 from .kb import retrieve
-from .standards import ARTIFACT_KINDS, CHECKLIST_ITEMS
+from .standards import ARTIFACT_KINDS, CHECKLIST_ITEMS, PROJECT_TYPES
 
 MIN_CONTENT = 200  # эвристика: артефакт содержательнее 200 символов
 
@@ -191,3 +194,79 @@ def _mock_draft(svc, kind: str, art) -> str:
 [TODO — заполните по шаблону] ({art['template_ref']})
 """
     return body
+
+
+# --- Design Session (сценарий A): документ → черновик карточки сервиса + требования --
+
+EXTRACT_SYSTEM = """Ты помогаешь завести сервис в системе архитектурного проектирования ДАТС.
+Из вставленного документа (ТЗ, письмо, описание задачи) извлеки данные сервиса
+и верни СТРОГО JSON-объект:
+{"code": "латинский код сервиса, 3-10 символов, верхний регистр, или null",
+ "name": "название сервиса по-русски или null",
+ "domain": "домен/направление или null",
+ "project_type": "один из: TYPE_KEYS, или null",
+ "summary": "суть сервиса в 1-2 предложениях или null",
+ "requirements": [{"type": "ФТ" | "НФТ", "text": "формулировка требования"}]}
+Правила:
+1. Чего нет в документе — ставь null, не придумывай.
+2. Требования — только те, что прямо следуют из документа; формулировки сохраняй близко к оригиналу.
+3. Только JSON без пояснений."""
+
+
+def extract_service(text: str, model: str = "") -> dict:
+    """Черновик карточки сервиса + требования из свободного документа (advisory, BR-33):
+    результат только предзаполняет форму — решение за человеком."""
+    text = (text or "").strip()
+    if not text:
+        return {"provider": "none", "draft": _fallback_extract("")}
+    if llm.configured():
+        prompt = EXTRACT_SYSTEM.replace("TYPE_KEYS", ", ".join(PROJECT_TYPES))
+        try:
+            raw = llm.chat([{"role": "system", "content": prompt},
+                            {"role": "user", "content": text[:12000]}],
+                           temperature=0.1, max_tokens=4000, model=model)
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                draft = _normalize_extract(json.loads(m.group(0)))
+                if draft is not None:
+                    return {"provider": "ai-buddy", "draft": draft}
+        except (llm.LLMError, ValueError, KeyError, TypeError):
+            pass
+    return {"provider": "fallback", "draft": _fallback_extract(text)}
+
+
+def _normalize_extract(raw: dict) -> dict | None:
+    """Приводит ответ LLM к безопасной форме; None — если ответ вообще не о сервисе."""
+    if not isinstance(raw, dict):
+        return None
+    name = (raw.get("name") or "").strip() or None
+    code = (raw.get("code") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z0-9_-]{2,16}", code):
+        code = None
+    pt = raw.get("project_type")
+    pt = pt if pt in PROJECT_TYPES else None
+    reqs_out = []
+    for it in (raw.get("requirements") or []):
+        t = (it.get("text") or "").strip()
+        if not t:
+            continue
+        typ = "nonfunc" if str(it.get("type", "")).upper().startswith("Н") else "func"
+        reqs_out.append({"req_type": typ, "text": t})
+    if not (name or code or reqs_out):
+        return None
+    return {"code": code, "name": name, "domain": (raw.get("domain") or "").strip() or None,
+            "project_type": pt, "summary": (raw.get("summary") or "").strip() or None,
+            "requirements": reqs_out}
+
+
+def _fallback_extract(text: str) -> dict:
+    """Без LLM: первая значимая строка — название, латиница в тексте — кандидат в код,
+    требования — построчная эвристика parse_document."""
+    lines = [ln.strip().lstrip("#-*•·0123456789. ").strip() for ln in (text or "").splitlines()]
+    lines = [ln for ln in lines if len(ln) > 3]
+    m = re.search(r"\b[A-Za-z]{3,10}\b", text or "")
+    return {"code": m.group(0).upper()[:10] if m else None,
+            "name": lines[0][:80] if lines else None,
+            "domain": None, "project_type": "mvp", "summary": None,
+            "requirements": [{"req_type": it["req_type"], "text": it["text"]}
+                             for it in reqs._naive_parse(text or "")]}
