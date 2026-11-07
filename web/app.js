@@ -289,7 +289,6 @@ async function viewService(id, tab='card', frag=''){
   const tabs = [['card','Карточка'],
     ['reqs', 'Требования' + (s.requirements?.length ? ` (${s.requirements.length})` : '')],
     ['design', 'Проектирование'],
-    ['packet', '📖 Пакет'],
     ARTIFACT_TAB(),['review','Ревью'],['components','Компоненты'],
     ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')],
     ['fitness', 'Fitness'], ['nfr', 'NFR']];
@@ -302,6 +301,8 @@ async function viewService(id, tab='card', frag=''){
       ${s.my_scope==='full'?'полный доступ':s.my_scope==='team'?'доступ команды':'только просмотр'}</span>`:''}
     <span class="chip">тип: <b>${esc(S.standard.project_types[s.project_type]?.title||s.project_type)}</b></span>
     ${s.cmdb_id?`<span class="chip">CMDB: <b>${esc(s.cmdb_id)}</b></span>`:''}
+    <a class="pk-hdrbtn${active==='packet'?' pk-hdrbtn-act':''}" href="#/service/${id}/packet"
+       title="Весь архитектурный пакет как документ: диаграммы, таблицы, оглавление (read-only)">📖 Пакет</a>
   </div>
   <div class="tabs">${tabs.map(([k,t])=>`<a class="${k===active?'act':''}" href="#/service/${id}/${k}">${t}</a>`).join('')}</div>
   <div id="tabbody"></div>`;
