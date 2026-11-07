@@ -1848,6 +1848,8 @@ function clearAskService(){
 function chatMsgHtml(m){
   if(m.role === 'user')
     return `<div class="msg user"><div class="bubble">${mdLite(m.text)}</div></div>`;
+  const tools = (m.tools || []).length ? `<div class="chat-tools">${m.tools.map(t =>
+    `<div class="small mut">🔧 ${esc(t.name)}(${esc(JSON.stringify(t.arguments || {}))})</div>`).join('')}</div>` : '';
   const cites = (m.citations || []).length ? `<div class="btnrow chat-cites">${m.citations.map(c =>
     `<span class="chip">📄 <a class="lnk" href="${esc(c.url)}" target="_blank">${esc(c.title)}</a>
      <span class="small mut">pageId=${c.page_id}</span></span>`).join('')}</div>` : '';
@@ -1855,7 +1857,7 @@ function chatMsgHtml(m){
       <span class="badge ${m.provider==='ai-buddy'?'b-approved':'b-in_review'} small-badge">${esc(PROVIDER_RU[m.provider]||m.provider||'')}</span>
       <span class="small mut">уверенность ${Math.round((m.confidence||0)*100)}% · advisory</span></div>`;
   return `<div class="msg bot"><div class="avatar">▲</div><div class="body">
-    <div class="bot-text">${mdLite(m.text)}</div>${cites}${meta}</div></div>`;
+    <div class="bot-text">${mdLite(m.text)}</div>${tools}${cites}${meta}</div></div>`;
 }
 
 function chatEmptyHtml(){
@@ -1930,11 +1932,11 @@ async function chatStream(question, history, model){
   let settle; const finished = new Promise(r => settle = r);   // resolve в finalize()
 
   const msg = {role:'bot', text:'', provider:'ai-buddy', model:null,
-               confidence:0, citations:[]};
+               confidence:0, citations:[], tools:[]};
   const node = document.createElement('div');
   node.className = 'msg bot';
   node.innerHTML = `<div class="avatar">▲</div><div class="body">
-    <div class="bot-text streaming"></div></div>`;
+    <div class="chat-tools"></div><div class="bot-text streaming"></div></div>`;
   // узел добавляется в лог при первой дельте — до этого виден typing-индикатор
   const txtEl = node.querySelector('.bot-text');
 
@@ -1968,6 +1970,12 @@ async function chatStream(question, history, model){
   };
   const handle = ev => {
     if(ev.type === 'meta') applyMeta(ev);
+    else if(ev.type === 'tool_use'){
+      msg.tools = (msg.tools || []).concat(ev.tools || []);
+      const tEl = node.querySelector('.chat-tools');
+      if(tEl) tEl.innerHTML = msg.tools.map(t =>
+        `<div class="small mut">🔧 ${esc(t.name)}(${esc(JSON.stringify(t.arguments || {}))})</div>`).join('');
+    }
     else if(ev.type === 'delta'){
       if(!metaDone) applyMeta({provider:'local-rag', model:null, confidence:0, citations:[]});
       full += ev.text;
@@ -2008,11 +2016,11 @@ async function chatStream(question, history, model){
 
 /* Fallback: обычный запрос к /assistant (если стриминг недоступен) */
 async function chatFallback(question, history, model){
-  const msg = {role:'bot', text:'', provider:'local-rag', model:null, confidence:0, citations:[]};
+  const msg = {role:'bot', text:'', provider:'local-rag', model:null, confidence:0, citations:[], tools:[]};
   try{
     const r = await api('/assistant', {method:'POST', body: JSON.stringify({question, history, model, chat_id: CHAT_ID, service_id: ASK_SERVICE})});
     msg.text = r.answer; msg.provider = r.provider; msg.model = r.model;
-    msg.confidence = r.confidence; msg.citations = r.citations || [];
+    msg.confidence = r.confidence; msg.citations = r.citations || []; msg.tools = r.tools || [];
     if(r.chat_id) CHAT_ID = r.chat_id;
   }catch(e){
     msg.text = `⚠ ${e.message}`; msg.provider = 'none';

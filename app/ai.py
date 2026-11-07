@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import llm, reqs
 from .db import q, q1
-from .kb import retrieve
+from .kb import retrieve_kb
 from .standards import ARTIFACT_KINDS, PROJECT_TYPES
 
 # Виды, у которых AI-черновик генерирует и Mermaid-исходник диаграммы (решение 2026-11-07:
@@ -182,7 +182,7 @@ def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
     # требования стандарта: релевантные чанки KB + спецификация артефакта
     query = f"{art['title']}. {art['question']} {art['captures']}"
     std_ctx = "\n\n".join(f"[{i}] {c['title']}: {c['chunk']}"
-                          for i, c in enumerate(retrieve(query, 3), 1))
+                          for i, c in enumerate(retrieve_kb(query, 3), 1))
     user_prompt = (f"Спецификация артефакта «{art['title']}» (kind={kind}):\n"
                    f"- Вопрос, на который отвечает артефакт: {art['question']}\n"
                    f"- Что фиксирует: {art['captures']}\n"
