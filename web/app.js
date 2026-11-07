@@ -13,6 +13,9 @@ if(window.mermaid){
 }
 const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const badge = (txt, cls) => `<span class="badge b-${cls}">${esc(txt)}</span>`;
+/* права на изменение сервиса: full (эксперт/админ) или team (владелец/product-группа) */
+const canEditSvc = s => s.my_scope === 'full' || s.my_scope === 'team';
+const canCreateSvc = () => ['admin','domain_expert','team_lead'].includes(S.user.role);
 const gradeB = g => badge(g==='E'?'Есть':g==='Ch'?'Частично':'Нет', g);
 const weightB = w => badge(w==='mandatory'?'обязательный':w==='desired'?'желательно':'не обязательный', w);
 const statusB = s => badge(s.replace('_',' '), s);
@@ -30,10 +33,15 @@ const route = (re, fn) => routes.push([re, fn]);
 async function render(){
   if(!S.user){ return viewLogin(); }
   const h = location.hash || '#/';
-  const nav = {'#/':'Дашборд','#/services':'Сервисы','#/assistant':'Ассистент','#/debts':'Техдолг','#/components':'Компоненты','#/access':'Доступ','#/admin':'Интеграции'};
+  // пункты меню показываем только там, где у роли есть хоть какие-то права
+  // (иначе страница встречает 403-текстом или стеной disabled-кнопок)
+  const nav = {'#/':'Дашборд','#/services':'Сервисы','#/debts':'Техдолг','#/components':'Компоненты'};
+  if(['admin','domain_expert'].includes(S.user.role)) nav['#/access'] = 'Доступ';
+  if(['admin','domain_expert','infosec'].includes(S.user.role)) nav['#/admin'] = 'Интеграции';
   $('#nav').innerHTML = Object.entries(nav).map(([u,t]) =>
     `<a href="${u}" class="${h.startsWith(u)&&u!=='#/'||h===u?'act':''}">${t}</a>`).join('');
-  $('#userbox').innerHTML = `${esc(S.user.display_name)} · ${S.user.role} <button class="sec" onclick="logout()">Выйти</button>`;
+  $('#userbox').innerHTML = `<b class="u-name">${esc(S.user.display_name)}</b><span class="u-role"> · ${S.user.role}</span> <button class="sec" onclick="logout()">Выйти</button>`;
+  aiTriggerMount();
   if(!S.standard) S.standard = await api('/standard');
   for(const [re, fn] of routes){ const m = h.match(re); if(m) return fn(...m.slice(1)); }
   return viewDash();
@@ -65,6 +73,10 @@ async function login(){
 }
 async function logout(){
   try{ await api('/logout', {method:'POST', body: '{}'}); }catch{}
+  document.getElementById('aipanel')?.remove();
+  document.getElementById('ai-trigger')?.remove();   // на экране логина чат-иконки быть не должно
+  CHAT = []; CHAT_ID = null; ASK_SERVICE = null; ASK_SVC_NAME = '';   // диалог не должен пережить logout (чужой чат — чужой контекст)
+  document.body.classList.remove('ai-open', 'ai-full');
   delete localStorage.token; S.user=null; location.hash='#/'; render();
 }
 
@@ -75,41 +87,103 @@ route(/^#\/services$/, viewServices);
 route(/^#\/service\/(\d+)(?:\/(\w+))?$/, (id, tab) => viewService(+id, tab));
 route(/^#\/components$/, viewComponents);
 route(/^#\/debts$/, viewDebts);
-route(/^#\/assistant$/, viewAssistant);
+// ассистент больше не страница, а панель поверх любого экрана;
+// старые ссылки #/assistant открывают панель поверх дашборда
+route(/^#\/assistant$/, async () => { location.replace('#/'); await aiPanelOpen(); });
 route(/^#\/access$/, async () => { SVC_CACHE = await api('/services'); return viewAccess(); });
+
+const FIT_DOT = f => !f ? '<span class="mut" title="Фитнес-проверки не запускались">○ нет</span>'
+  : f.failed ? `<span style="color:var(--bad)" title="${f.failed} красных">● ${f.failed} красн.</span>`
+  : f.warned ? `<span style="color:var(--warn)" title="${f.warned} предупреждений">● ${f.warned} предупр.</span>`
+  : '<span style="color:var(--ok)" title="Все проверки зелёные">● ok</span>';
+const fmtTs = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : '';
 
 async function viewDash(){
   const d = await api('/dashboard');
   const st = s => d.by_review_status.find(x=>x.review_status===s)?.n||0;
+  const dp = p => d.debt_by_priority.find(x=>x.priority===p)?.n||0;
+  const debtOpen = dp('P0') + dp('P1') + dp('P2') + dp('P3');
+  const covCard = (t, list, link) => {
+    const shown = list.slice(0, 5);
+    const more = list.length - shown.length;
+    return `<div class="card"><div class="mut">${t}</div>
+    <div class="kpi" style="color:${list.length ? 'var(--warn)' : 'var(--ok)'}">${list.length}</div>
+    <div class="small mut">${list.length
+      ? shown.map(x=>`<a class="lnk" href="#/service/${x.id}">${esc(x.code)}</a>`).join(', ')
+        + (more > 0 ? ` · <a class="lnk" href="${link}">+${more} ещё</a>` : '')
+      : 'покрыто полностью'}</div></div>`;
+  };
   $('#view').innerHTML = `
   <h1>Дашборд соответствия стандарту</h1>
   <p class="mut"><a class="lnk" href="${d.standard_ref}" target="_blank">Общий архитектурный стандарт (Architecture Definition Set) ↗</a></p>
-  <div class="grid g3" style="margin:18px 0">
-    <div class="card vio"><div class="mut">Сервисов в реестре</div><div class="kpi">${d.total_services}</div></div>
-    <div class="card"><div class="mut">На ревью / согласовано</div><div class="kpi">${st('in_review')} <span class="mut" style="font-size:16px">/</span> <span style="color:var(--ok)">${st('approved')}</span></div></div>
-    <div class="card cya"><div class="mut">Нужны изменения</div><div class="kpi" style="color:var(--warn)">${st('changes_requested')}</div></div>
+  <div class="grid g4" style="margin:18px 0">
+    <a class="card vio kpi-link" href="#/services" onclick="S.showArchived=${d.archived_services>0}"><div class="mut">Сервисов в реестре</div><div class="kpi">${d.total_services}</div><div class="small mut">${d.archived_services ? `в архиве: ${d.archived_services}` : 'все активные'}</div></a>
+    <a class="card kpi-link" href="#/services"><div class="mut">На ревью / согласовано</div><div class="kpi">${st('in_review')} <span class="mut" style="font-size:16px">/</span> <span style="color:var(--ok)">${st('approved')}</span></div></a>
+    <a class="card cya kpi-link" href="#/services"><div class="mut">Нужны изменения</div><div class="kpi" style="color:${st('changes_requested') ? 'var(--warn)' : 'var(--ok)'}">${st('changes_requested')}</div></a>
+    <a class="card kpi-link" href="#/debts"><div class="mut">Открытый техдолг P0+P1</div><div class="kpi" style="color:${dp('P0')+dp('P1') ? 'var(--bad)' : 'var(--ok)'}">${dp('P0')+dp('P1')}</div><div class="small mut">всего открытых: ${debtOpen}</div></a>
   </div>
-  <h2>Последняя активность</h2>
-  <div class="card"><table><tr><th>Сервис</th><th>Self-check</th><th>Статус ревью</th></tr>
-  ${d.recent.map(r=>`<tr><td><a class="lnk" href="#/service/${r.id}"><b>${esc(r.name)}</b> <span class="mut">${esc(r.code)}</span></a></td>
-    <td><div class="bar" style="width:130px"><i style="width:${r.score||0}%"></i></div><span class="small mut">${r.score||0}%</span></td>
-    <td>${statusB(r.review_status)}</td></tr>`).join('')}
+  ${(d.my_tasks.pending_reviews.length || d.my_tasks.blockers.length) ? `
+  <h2>Мои задачи</h2>
+  <div class="grid g2" style="margin:14px 0">
+    ${d.my_tasks.pending_reviews.length ? `<div class="card"><div class="mut" style="margin-bottom:8px">Ждут моего решения по ревью</div>
+      ${d.my_tasks.pending_reviews.map(r=>`<div style="margin:6px 0"><a class="lnk" href="#/service/${r.service_id}"><b>${esc(r.code)}</b> ${esc(r.name)}</a>
+        <span class="small mut">· запросил ${esc(r.requested_by)} ${fmtTs(r.requested_at)}</span></div>`).join('')}</div>` : ''}
+    ${d.my_tasks.blockers.length ? `<div class="card"><div class="mut" style="margin-bottom:8px">Блокеры в моих сервисах</div>
+      ${d.my_tasks.blockers.map(b=>`<div style="margin:6px 0"><a class="lnk" href="#/service/${b.id}"><b>${esc(b.code)}</b> ${esc(b.name)}</a>
+        <span class="small mut">· ${b.why.map(esc).join(' · ')}</span></div>`).join('')}</div>` : ''}
+  </div>` : `<p class="mut" style="margin:14px 0">На вас ничего не висит — ожидающих ревью и блокеров в ваших сервисах нет.</p>`}
+  <h2>Готовность к ревью</h2>
+  <div class="card"><table><tr><th>Сервис</th><th>Обязательные артефакты</th><th>Готовность</th><th>Фитнес</th><th>Техдолг</th><th>Ревью</th><th>Следующий шаг</th></tr>
+  ${d.readiness.map(r=>{
+    const fill = r.mandatory_total - r.mandatory_missing.length;
+    return `<tr><td><a class="lnk" href="#/service/${r.id}"><b>${esc(r.name)}</b> <span class="mut">${esc(r.code)}</span></a></td>
+    <td><b>${fill}/${r.mandatory_total}</b>${r.mandatory_missing.length ? `<div class="small mut">нет: ${esc(r.mandatory_missing.map(m=>m.title).join(', '))}</div>` : '<div class="small" style="color:var(--ok)">все обязательные заполнены</div>'}</td>
+    <td>${r.self_check == null ? '<span class="mut">не проводился</span>' : `<div class="bar" style="width:110px"><i style="width:${r.self_check}%"></i></div><span class="small mut">${r.self_check}%</span>`}</td>
+    <td><a class="lnk no-ul" href="#/service/${r.id}/fitness" title="Открыть fitness-проверки">${FIT_DOT(r.fitness)}</a></td>
+    <td>${r.debts_open ? `<a class="lnk no-ul" href="#/service/${r.id}/debt" title="Открыть техдолг сервиса"><span ${r.debts_p0 ? 'style="color:var(--bad);font-weight:600"' : ''}>${r.debts_open}</span> <span class="mut small">откр.</span></a>` : '<span class="mut">—</span>'}</td>
+    <td>${statusB(r.review_status)}</td>
+    <td class="small"><a class="lnk" href="#${r.hint_link}">${esc(r.hint)}</a></td></tr>`;
+  }).join('')}
   </table></div>
+  <h2>Риски и техдолг</h2>
+  <div class="grid g4" style="margin:14px 0">
+    ${['P0','P1','P2','P3'].map(p=>`<div class="card"><div class="mut">Приоритет ${p}</div>
+      <div class="kpi" style="color:${p==='P0'&&dp(p) ? 'var(--bad)' : dp(p) ? 'var(--txt)' : 'var(--ok)'}">${dp(p)}</div></div>`).join('')}
+  </div>
+  ${d.debt_top.length ? `<div class="card"><table><tr><th>ID</th><th>Пункт долга</th><th>Сервис</th><th>Приоритет</th><th>Риск</th><th>Статус</th></tr>
+  ${d.debt_top.map(t=>`<tr><td class="small mut">${esc(t.debt_id)}</td><td>${esc(t.title)}</td>
+    <td>${t.service_id ? `<a class="lnk" href="#/service/${t.service_id}">${esc(t.code)}</a>` : '<span class="mut">—</span>'}</td>
+    <td><b>${esc(t.priority)}</b></td><td>${esc(t.risk)}</td><td>${statusB(t.status)}</td></tr>`).join('')}
+  </table><p class="small mut" style="margin:10px 0 0"><a class="lnk" href="#/debts">весь техдолг →</a></p></div>`
+  : '<p class="mut">Открытых пунктов P0/P1 нет.</p>'}
+  <h2>Покрытие процессом</h2>
+  <div class="grid g3" style="margin:14px 0">
+    ${covCard('Сервисов без требований (ФТ/НФТ)', d.coverage.no_requirements, '#/services')}
+    ${covCard('Сервисов без C4-модели', d.coverage.no_c4, '#/services')}
+    ${covCard('Без проверки готовности', d.coverage.no_checklist, '#/services')}
+  </div>
+  ${d.activity.length ? `<h2>Последние события</h2>
+  <div class="card"><table class="small">${d.activity.slice(0,8).map(a=>`<tr><td class="mut" style="white-space:nowrap">${fmtTs(a.ts)}</td><td>${esc(a.user)}</td>
+    <td>${esc(a.action_label || a.action)}</td><td class="mut" title="${esc(a.entity || '')}">${esc(a.entity_label || a.entity || '')}${a.detail ? ' · ' + esc(String(a.detail)).slice(0,60) : ''}</td></tr>`).join('')}</table></div>` : ''}
   <h2>Переиспользование компонентов</h2>
   <div class="card"><table><tr><th>Компонент</th><th>Статус</th><th>Используют сервисов</th></tr>
-  ${d.component_usage.map(c=>`<tr><td>${esc(c.name)}</td><td>${statusB(c.status)}</td><td><b>${c.used_by}</b></td></tr>`).join('')}
+  ${d.component_usage.map(c=>`<tr><td>${esc(c.name)}</td><td>${statusB(c.status)}</td><td><b>${c.used_by}</b>${c.used_by ? '' : ' <span class="small mut">— нет потребителей</span>'}</td></tr>`).join('')}
   </table></div>
-  <footer>DeepArch MVP · BR-01…37 · источники: Architecture Definition Set (Confluence DA), self-check (10 пунктов), матрица типов проектов</footer>`;
+  <footer>DeepArch MVP · BR-01…37 · источники: Architecture Definition Set (Confluence DA), авто-проверка готовности к ревью, матрица типов проектов</footer>`;
 }
 
 /* ---------- services ---------- */
 async function viewServices(){
-  const list = await api('/services');
+  const list = await api('/services'+(S.showArchived?'?include_archived=1':''));
   $('#view').innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center">
-    <h1>Реестр сервисов</h1><button onclick="formService()">+ Сервис</button></div>
+    <h1>Реестр сервисов</h1>
+    <div style="display:flex;gap:10px;align-items:center">
+      <label class="small mut" style="cursor:pointer"><input type="checkbox" ${S.showArchived?'checked':''}
+        onchange="S.showArchived=this.checked;viewServices()"> показать архив</label>
+      <button onclick="formService()" ${canCreateSvc()?'':'disabled title="Создание сервисов: team_lead, domain_expert, admin"'}>+ Сервис</button></div></div>
   <p class="mut">Карточка сервиса (BR-01, пункт 10 чек-листа) · тип проекта определяет обязательный набор артефактов</p>
-  <div class="card" style="margin-top:16px"><table><tr><th>Сервис</th><th>Тип проекта</th><th>Владелец / архитектор</th><th>Self-check</th><th>Ревью</th><th>CMDB</th></tr>
-  ${list.map(s=>`<tr><td><a class="lnk" href="#/service/${s.id}"><b>${esc(s.name)}</b></a><div class="small mut">${esc(s.code)} · ${esc(s.domain||'—')}</div></td>
+  <div class="card" style="margin-top:16px"><table><tr><th>Сервис</th><th>Тип проекта</th><th>Владелец / архитектор</th><th>Готовность</th><th>Ревью</th><th>CMDB</th></tr>
+  ${list.map(s=>`<tr><td><a class="lnk" href="#/service/${s.id}"><b>${esc(s.name)}</b></a>${s.lifecycle==='decommissioned'?' <span class="badge b-decommissioned">выведен</span>':''}<div class="small mut">${esc(s.code)} · ${esc(s.domain||'—')}</div></td>
     <td class="small">${esc(S.standard.project_types[s.project_type]?.title||s.project_type)}</td>
     <td class="small">${esc(s.owner||'—')} / ${esc(s.architect||'—')}</td>
     <td><div class="bar" style="width:110px"><i style="width:${s.last_score||0}%"></i></div><span class="small mut">${s.last_score||0}%</span></td>
@@ -117,29 +191,77 @@ async function viewServices(){
     <td class="small">${s.cmdb_id?`<code>${esc(s.cmdb_id)}</code>`:'<span class="mut">—</span>'}</td></tr>`).join('')}
   </table></div>`;
 }
+async function setLifecycle(id, lc){
+  await api('/services/'+id, {method:'PATCH', body: JSON.stringify({lifecycle:lc})});
+  toast(lc==='decommissioned' ? 'Сервис выведен из эксплуатации (архив)' : 'Сервис возвращён в работу');
+  viewService(id,'card');
+}
+async function deleteService(id){
+  const s = await api('/services/'+id).catch(()=>null);
+  if(!s) return;
+  const code = prompt(`Необратимо удалить сервис ${s.name} и ВСЕ его данные (артефакты, C4, ревью, техдолг)?\nДля подтверждения введите код сервиса: ${s.code}`);
+  if(code===null) return;
+  try{
+    await api('/services/'+id, {method:'DELETE', body: JSON.stringify({confirm:code.trim()})});
+    toast('Сервис удалён'); location.hash = '#/services'; viewServices();
+  }catch(e){ toast(e.message, true); }
+}
 function formService(){
   const opts = Object.entries(S.standard.project_types).map(([k,v])=>`<option value="${k}">${esc(v.title)}</option>`).join('');
   openModal('Service Factory — новый сервис (BR-45…47)', `
-    <p class="small mut">Генерирует стартовый архитектурный пакет: 7 артефактов по шаблонам стандарта,
-    пустой self-check и подключение всех approved-компонентов каталога (compliance by construction).</p>
+    <p class="small mut">Генерирует стартовый архитектурный пакет: все артефакты по шаблонам стандарта
+    (${S.standard.artifacts.length} шт.) и подключение всех approved-компонентов каталога (compliance by construction).
+    Готовность к ревью проверяется автоматически.</p>
     <div class="grid g2"><div><label>Код (напр. MPR)</label><input id="f-code"></div>
     <div><label>Название</label><input id="f-name"></div></div>
     <div class="grid g2"><div><label>Тип проекта</label><select id="f-pt">${opts}</select></div>
     <div><label>Домен</label><input id="f-domain"></div></div>
     <div class="grid g2"><div><label>Владелец</label><input id="f-owner" value="${esc(S.user.username)}"></div>
     <div><label>Архитектор</label><input id="f-arch" value="${esc(S.user.username)}"></div></div>
-    <div class="btnrow"><button onclick="createService()">Сгенерировать пакет</button></div>`);
+    <div style="margin-top:10px"><label>Из документа — ТЗ / письмо / описание задачи (Design Session)</label>
+    <textarea id="f-doc" style="min-height:90px" placeholder="Вставьте текст — извлечём черновик карточки и требования (advisory, проверьте перед созданием)"></textarea></div>
+    <div class="btnrow"><button class="sec" onclick="extractFromDoc()">⎘ Заполнить из документа</button></div>
+    <div class="btnrow"><button onclick="createService()">Сгенерировать пакет</button>
+    <button class="sec" onclick="closeModal()">Отмена</button></div>`);
+}
+let _REQ_DRAFT = [];  // требования, разобранные из документа до создания сервиса
+async function extractFromDoc(){
+  const text = $('#f-doc').value.trim();
+  if(!text){ toast('Вставьте текст документа', true); return; }
+  const btn = [...document.querySelectorAll('#modal button')].find(b=>b.textContent.includes('Заполнить из документа'));
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Извлекаю…'; }
+  try{
+    const r = await api('/ai/service-extract', {method:'POST', body: JSON.stringify({text})});
+    const d = r.draft || {};
+    if(d.code) $('#f-code').value = d.code;
+    if(d.name) $('#f-name').value = d.name;
+    if(d.domain) $('#f-domain').value = d.domain;
+    if(d.project_type && S.standard.project_types[d.project_type]) $('#f-pt').value = d.project_type;
+    _REQ_DRAFT = (d.requirements||[]).map(x=>({req_type: x.req_type || (String(x.type||'')[0]==='Н'?'nonfunc':'func'),
+                                               text: x.text||''})).filter(x=>x.text);
+    toast(`Извлечено (${r.provider}): ${_REQ_DRAFT.length} требований. Проверьте поля — решение за вами.`);
+  }catch(e){ toast(esc(e.message), true); }
+  finally{ if(btn){ btn.disabled = false; btn.textContent = '⎘ Заполнить из документа'; } }
 }
 async function createService(){
   try{
     const r = await api('/factory/scaffold', {method:'POST', body: JSON.stringify({
       code:$('#f-code').value, name:$('#f-name').value, project_type:$('#f-pt').value,
       domain:$('#f-domain').value, owner:$('#f-owner').value, architect:$('#f-arch').value})});
+    let reqNote = '';
+    if(_REQ_DRAFT.length){
+      try{
+        const ri = await api('/services/'+r.id+'/requirements/import',
+                             {method:'POST', body: JSON.stringify({items:_REQ_DRAFT})});
+        reqNote = `<p class="small mut">Импортировано требований из документа: <b>${ri.created.length}</b>.</p>`;
+      }catch(e){ reqNote = `<p class="small" style="color:var(--bad)">Требования не импортированы: ${esc(e.message)} — добавьте вручную на вкладке «Требования».</p>`; }
+      _REQ_DRAFT = [];
+    }
     closeModal();
     openModal(`Сервис ${esc(r.code)} создан`, `
       <p class="small mut">Сгенерировано: ${r.artifacts} артефактов по шаблонам стандарта ·
       подключено компонентов: ${r.components_attached.length}
-      (${esc(r.components_attached.join(', ')||'—')}).</p>
+      (${esc(r.components_attached.join(', ')||'—')}).</p>${reqNote}
       <h2 style="margin:10px 0 4px">Next steps</h2>
       <ol class="small">${r.next_steps.map(s=>`<li style="margin:4px 0">${esc(s)}</li>`).join('')}</ol>
       <div class="btnrow"><button onclick="closeModal();location.hash='#/service/${r.id}'">Открыть сервис</button></div>`);
@@ -148,14 +270,26 @@ async function createService(){
 }
 
 /* ---------- service detail ---------- */
-const TABS = [['card','Карточка'],['artifacts','Артефакты (7)'],['diagrams','Диаграммы'],['check','Self-check'],['review','Ревью'],['components','Компоненты']];
+const ARTIFACT_TAB = () => ['artifacts','Артефакты' + (S.standard ? ` (${S.standard.artifacts.length})` : '')]; // число видов артефактов — из стандарта, не хардкод
+const TABS = [['card','Карточка'],ARTIFACT_TAB(),['review','Ревью'],['components','Компоненты']]; // базовый список (полный собирается в viewService)
 let SERVICE = null;
+let _VS_GEN = 0;                    // защита от гонки: у каждого вызова viewService свой номер
 async function viewService(id, tab='card'){
-  const s = await api('/services/'+id); SERVICE = s;
+  if(tab === 'check'){                          // self-check интегрирован в «Ревью» — старые ссылки работают
+    location.hash = `#/service/${id}/review`; return;
+  }
+  if(tab === 'diagrams'){                       // «Диаграммы» слиты в «Проектирование» — старые ссылки работают
+    location.hash = `#/service/${id}/design`; return;
+  }
+  const gen = ++_VS_GEN;
+  const s = await api('/services/'+id);
+  if(gen !== _VS_GEN) return;       // пока летел запрос, навигация ушла дальше — рендер устарел
+  SERVICE = s;
   const active = tab||'card';
-  const tabs = [...TABS.slice(0, 1),
+  const tabs = [['card','Карточка'],
     ['reqs', 'Требования' + (s.requirements?.length ? ` (${s.requirements.length})` : '')],
-    ...TABS.slice(1),
+    ['design', 'Проектирование'],
+    ARTIFACT_TAB(),['review','Ревью'],['components','Компоненты'],
     ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')],
     ['fitness', 'Fitness'], ['nfr', 'NFR']];
   $('#view').innerHTML = `
@@ -170,7 +304,7 @@ async function viewService(id, tab='card'){
   </div>
   <div class="tabs">${tabs.map(([k,t])=>`<a class="${k===active?'act':''}" href="#/service/${id}/${k}">${t}</a>`).join('')}</div>
   <div id="tabbody"></div>`;
-  ({card:tabCard, reqs:tabReqs, artifacts:tabArtifacts, diagrams:tabDiagrams, check:tabCheck, review:tabReview,
+  ({card:tabCard, reqs:tabReqs, design:tabDesign, artifacts:tabArtifacts, review:tabReview,
     components:tabComponents, debt:tabDebt, fitness:tabFitness, nfr:tabNfr}[active])(s);
 }
 
@@ -232,44 +366,47 @@ async function renderDiag(el, code){
   el.classList.toggle('diag-err', bad);
   el.innerHTML = parts.join('');
 }
-function tabDiagrams(s){
-  const arts = S.standard.artifacts;
-  const byKind = Object.fromEntries(s.artifacts.map(a=>[a.kind,a]));
-  const withDiag = arts.filter(a=>(byKind[a.kind]?.diagram_code||'').trim());
-  $('#tabbody').innerHTML = `<p class="mut small" style="margin-bottom:12px">
-    Диаграммы рендерятся из исходников (Mermaid: C4 Context/Container/Deployment, erDiagram, flowchart) —
-    исходник = единый источник правды, картинка вторична (требование стандарта о сохранении преемственности).</p>
-  ${withDiag.length ? withDiag.map(a=>`
-    <div class="card" style="margin-bottom:14px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <b>${esc(a.title)}</b><a class="lnk small" href="#/service/${s.id}/artifacts">редактировать →</a>
-      </div>
-      <div class="diag" id="dvx-${a.kind}"></div>
-    </div>`).join('')
-    : '<div class="card"><p class="mut">Ни у одного артефакта пока нет диаграммы. Откройте «Артефакты» и добавьте Mermaid-исходник.</p></div>'}`;
-  withDiag.forEach(a => renderDiag(document.getElementById('dvx-'+a.kind), byKind[a.kind].diagram_code));
-}
-
+const _stepLink = (sid, t) =>
+  /Заполнить артефакты/.test(t) ? `#/service/${sid}/artifacts` :
+  /C4-модель/.test(t) ? `#/service/${sid}/design` :
+  /ревью/i.test(t) ? `#/service/${sid}/review` :
+  `#/service/${sid}/review`;
 function tabCard(s){
+  const chk = s.checklist_runs[0];
+  // свёрка сигналов: self-check пройден, но next_steps видят незаполненные артефакты
+  const stepsFill = (s.next_steps||[]).some(t=>/Заполнить артефакты/.test(t));
+  const mismatch = chk && !chk.mandatory_missing && (chk.score_pct||0) >= 100 && stepsFill;
+  const ed = canEditSvc(s);
+  const dis = ed ? '' : 'disabled';
   $('#tabbody').innerHTML = `<div class="grid g2">
-  <div class="card vio"><h2 style="margin-top:0">Карточка сервиса</h2>
-    <label>Название</label><input id="c-name" value="${esc(s.name)}">
+  <div class="card vio"><h2 style="margin-top:0">Карточка сервиса ${ed?'':'<span class="badge b-draft">только просмотр</span>'}</h2>
+    <label>Название</label><input id="c-name" value="${esc(s.name)}" ${dis}>
     <div class="grid g2"><div><label>Код</label><input value="${esc(s.code)}" disabled></div>
-    <div><label>Домен</label><input id="c-domain" value="${esc(s.domain||'')}"></div></div>
-    <div class="grid g2"><div><label>Владелец</label><input id="c-owner" value="${esc(s.owner||'')}"></div>
-    <div><label>Архитектор</label><input id="c-architect" value="${esc(s.architect||'')}"></div></div>
-    <div class="grid g2"><div><label>Тип проекта</label><select id="c-pt">${Object.entries(S.standard.project_types).map(([k,v])=>`<option value="${k}" ${k===s.project_type?'selected':''}>${esc(v.title)}</option>`).join('')}</select></div>
-    <div><label>Жизненный цикл</label><select id="c-lc">${['design','development','production','decommissioned'].map(l=>`<option ${l===s.lifecycle?'selected':''}>${l}</option>`).join('')}</select></div></div>
-    <label>CMDB ID</label><input id="c-cmdb" value="${esc(s.cmdb_id||'')}" placeholder="CI из CMDB (BR-20)">
-    <div class="btnrow"><button onclick="saveCard(${s.id})">Сохранить</button>
+    <div><label>Домен</label><input id="c-domain" value="${esc(s.domain||'')}" ${dis}></div></div>
+    <div class="grid g2"><div><label>Владелец</label><input id="c-owner" value="${esc(s.owner||'')}" ${dis}></div>
+    <div><label>Архитектор</label><input id="c-architect" value="${esc(s.architect||'')}" ${dis}></div></div>
+    <div class="grid g2"><div><label>Тип проекта</label><select id="c-pt" ${dis}>${Object.entries(S.standard.project_types).map(([k,v])=>`<option value="${k}" ${k===s.project_type?'selected':''}>${esc(v.title)}</option>`).join('')}</select></div>
+    <div><label>Жизненный цикл</label><select id="c-lc" ${dis}>${['design','development','production','decommissioned'].map(l=>`<option ${l===s.lifecycle?'selected':''}>${l}</option>`).join('')}</select></div></div>
+    <label>CMDB ID</label><input id="c-cmdb" value="${esc(s.cmdb_id||'')}" placeholder="CI из CMDB (BR-20)" ${dis}>
+    <div class="btnrow"><button onclick="saveCard(${s.id})" ${ed?'':'disabled'}>Сохранить</button>
     <button class="cya" onclick="exportCatalog(${s.id})">Экспорт catalog-info.yaml (BR-21)</button>
-    <button class="sec" onclick="askAssistantAbout(${s.id})">▲ Спросить ассистента</button></div></div>
+    <button class="sec" onclick="askAssistantAbout(${s.id})">▲ Спросить ассистента</button>
+    ${['admin','domain_expert'].includes(S.user.role) ? (s.lifecycle==='decommissioned'
+      ? `<button class="sec" onclick="setLifecycle(${s.id},'production')">↩ Вернуть в работу</button>`
+      : `<button class="sec" onclick="setLifecycle(${s.id},'decommissioned')">🗄 Вывести из эксплуатации</button>`) : ''}
+    ${S.user.role==='admin' ? `<button class="sec" style="color:var(--bad);border-color:var(--bad-line)" onclick="deleteService(${s.id})">🗑 Удалить</button>` : ''}
+    </div></div>
   <div class="card"><h2 style="margin-top:0">Обязательные артефакты для типа</h2>
     <p class="mut small">Матрица «Минимальные наборы по типам проектов» из Навигатора стандарта</p>
     ${s.mandatory_artifacts.map(k=>`<span class="chip">● ${esc(S.standard.artifacts.find(a=>a.kind===k)?.title||k)}</span>`).join('')||'<span class="mut">—</span>'}
-    <h2>Последний self-check</h2>
-    ${s.checklist_runs[0]?`<div class="kpi">${s.checklist_runs[0].score_pct}%</div>
-      <p class="small mut">обязательных не закрыто: <b style="color:${s.checklist_runs[0].mandatory_missing?'var(--bad)':'var(--ok)'}">${s.checklist_runs[0].mandatory_missing}</b> · ${new Date(s.checklist_runs[0].created_at*1000).toLocaleDateString('ru')}</p>`:'<p class="mut">— не проводился</p>'}
+    <h2>Последняя проверка готовности</h2>
+    ${chk?`<div class="kpi">${chk.score_pct}%</div>
+      <p class="small mut">обязательных не закрыто: <b style="color:${chk.mandatory_missing?'var(--bad)':'var(--ok)'}">${chk.mandatory_missing}</b> · ${new Date(chk.created_at*1000).toLocaleDateString('ru')}</p>`:'<p class="mut">— не проводилась (фиксируется при отправке на ревью)</p>'}
+  </div>
+  <div class="card"><h2 style="margin-top:0">Следующие шаги</h2>
+    <p class="mut small">Живой список: пересчитывается по фактическому состоянию сервиса · клик ведёт на нужную вкладку</p>
+    ${mismatch?`<p class="small" style="background:var(--warn-soft);border:1px solid var(--warn-line);color:var(--warn);border-radius:8px;padding:8px 11px;margin-bottom:8px">⚠ Последняя проверка показывала ${chk.score_pct}%, но часть артефактов теперь пуста — актуальная готовность в <a class="lnk" href="#/service/${s.id}/review">«Ревью»</a></p>`:''}
+    <ol class="small">${(s.next_steps||[]).map(t=>`<li style="margin:5px 0"><a class="lnk" href="${_stepLink(s.id,t)}">${esc(t)} →</a></li>`).join('')}</ol>
   </div></div>`;
 }
 async function saveCard(id){
@@ -284,65 +421,125 @@ async function exportCatalog(id){
   openModal('catalog-info.yaml (BR-21, mock)', `<textarea style="min-height:320px">${esc(JSON.stringify(r.catalog_entity,null,2))}</textarea>`);
 }
 
+/* Виды артефактов, для которых диаграмма осмысленна: у остальных поле диаграммы
+   скрыто (шум, растягивающий карточку), существующий diagram_code сохраняется */
+const DIAG_KINDS = ['vision_c4', 'deployment', 'data_model'];
+let ART_JUMP = null;              // переход из галереи «Проектирования»: открыть и проскроллить
+const _artFilled = k => !!(k && (((k.content_md||'').trim()) || ((k.diagram_code||'').trim())));
+
 function tabArtifacts(s){
+  const ed = canEditSvc(s);
   const arts = S.standard.artifacts;
   const byKind = Object.fromEntries(s.artifacts.map(a=>[a.kind,a]));
   const mandatoryCount = s.mandatory_artifacts.filter(k => {
-    const c = byKind[k]; return !c || !(c.content_md||'').trim();
+    const c = byKind[k]; return !_artFilled(c);      // как в readiness: текст ИЛИ диаграмма
   }).length;
   $('#tabbody').innerHTML = `
-  <div class="card" style="margin-bottom:14px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <div><b>Артефакты сервиса</b>
-      <span class="small mut">· обязательных для типа: ${s.mandatory_artifacts.length}${mandatoryCount?`, без контента: <b style="color:var(--bad)">${mandatoryCount}</b>`:''}</span>
+  <div class="card" style="margin-bottom:14px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div><b>Артефакты сервиса</b>
+        <span class="small mut">· обязательных для типа: ${s.mandatory_artifacts.length}${mandatoryCount?`, без контента: <b style="color:var(--bad)">${mandatoryCount}</b>`:''}</span>
+      </div>
+      <button class="cya" onclick="scaffoldArtifacts(${s.id}, this)" ${ed?'':'disabled title="Нет прав на изменение сервиса"'}>⚡ Сгенерировать скелеты обязательных артефактов</button>
     </div>
-    <button class="cya" onclick="scaffoldArtifacts(${s.id}, this)">⚡ Сгенерировать скелеты обязательных артефактов</button>
+    <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+      ${arts.map(a=>{
+        const f = _artFilled(byKind[a.kind]);
+        const mand = s.mandatory_artifacts.includes(a.kind);
+        const st = f ? '<span style="color:#047857">✓</span>'
+          : mand ? '<span style="color:#be123c">✗</span>' : '<span style="color:#52525b">○</span>';
+        return `<button class="chip art-idx" onclick="artJump('${a.kind}')" title="Перейти к артефакту">${st} ${esc(a.title)}</button>`;
+      }).join('')}
+    </div>
   </div>` + arts.map(a=>{
     const cur = byKind[a.kind]||{};
     const mandatory = s.mandatory_artifacts.includes(a.kind);
-    return `<div class="card" style="margin-bottom:14px">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-      <div><b>${esc(a.title)}</b> ${mandatory?'<span class="badge b-mandatory">обязательный для типа</span>':''}
-      <div class="small mut">${esc(a.question)}</div></div>
-      <div class="small mut">v${cur.version||1} · ${cur.updated_by?esc(cur.updated_by):'—'}</div>
-    </div>
+    const dis = ed ? '' : 'disabled';
+    const f = _artFilled(cur);
+    const diagKind = DIAG_KINDS.includes(a.kind);
+    // подсказка (решение 2026-11-07): у обязательных пустых диаграмм AI-черновик — старт, а не опция
+    const diagBoost = mandatory && !f && diagKind && a.kind !== 'vision_c4';
+    const open = !f && mandatory;   // пустой обязательный раскрыт; опциональный пустой — свёрнут,
+                                    // чтобы пустой draft не превращался обратно в простыню (ревью 2026-11-07)
+    return `<details class="art-card" id="art-${a.kind}" ${open?'open':''}>
+    <summary>
+      <b>${esc(a.title)}</b> ${mandatory?'<span class="badge b-mandatory">обязательный для типа</span>':''}
+      ${f?'<span class="chip" style="background:#ecfdf5;color:#047857">✓ заполнен</span>'
+        :`<span class="chip" style="background:${mandatory?'#fff1f2;color:#be123c':'var(--surface2);color:#52525b'}">${mandatory?'✗ пуст · блокер готовности':'○ пуст'}</span>`}
+      <span class="small mut" style="margin-left:auto">v${cur.version||1} · ${cur.updated_by?esc(cur.updated_by):'—'}</span>
+    </summary>
+    <div class="small mut" style="margin:8px 0 0">${esc(a.question)}</div>
     <div class="split">
       <div>
         <label style="margin-top:10px">Описание (markdown)</label>
-        <textarea id="a-${a.kind}" placeholder="Что фиксируем: ${esc(a.captures)}">${esc(cur.content_md||'')}</textarea>
-        <label>Исходник диаграммы (Mermaid: C4Context / C4Container / C4Deployment / erDiagram / flowchart)</label>
-        <textarea class="diagcode" id="d-${a.kind}" oninput="liveDiagram(this)" placeholder="${a.kind==='vision_c4'?'C4Context · Person · System · Rel · SHOW_LEGEND()':a.kind==='data_model'?'erDiagram · USER ||--o{ ORDER : places':a.kind==='deployment'?'C4Deployment · Deployment_Node → Container':'flowchart LR · A --> B'}">${esc(cur.diagram_code||'')}</textarea>
+        <textarea id="a-${a.kind}" placeholder="Что фиксируем: ${esc(a.captures)}" ${dis}>${esc(cur.content_md||'')}</textarea>
+        ${diagKind?`
+        ${a.kind==='vision_c4'?'<p class="small mut" style="margin:6px 0 0">Mermaid-исходник L1/L2 — производная C4-модели из вкладки «Проектирование» и обновляется ею автоматически; правьте модель там.</p>':''}
+        <label>Исходник диаграммы (Mermaid: C4Context / C4Container / C4Deployment / erDiagram)</label>
+        <textarea class="diagcode" id="d-${a.kind}" oninput="liveDiagram(this)" ${dis} ${a.kind==='vision_c4'?'readonly title="Синхронизируется из «Проектирования»"':''} placeholder="${a.kind==='vision_c4'?'C4Context · Person · System · Rel · SHOW_LEGEND()':a.kind==='data_model'?'erDiagram · USER ||--o{ ORDER : places':'C4Deployment · Deployment_Node → Container'}">${esc(cur.diagram_code||'')}</textarea>
+        ${diagBoost?'<p class="small mut" style="margin:6px 0 0">Обязателен для типа — начните с «✨ AI-черновик»: он сгенерирует и описание, и черновик диаграммы, затем правьте текст.</p>':''}`
+        :''}
       </div>
       <div>
-        <label style="margin-top:10px">Превью диаграммы (live)</label>
-        <div class="diag" id="dv-${a.kind}"></div>
+        ${diagKind?`<label style="margin-top:10px">Превью диаграммы (live)</label><div class="diag" id="dv-${a.kind}"></div>`:''}
         <div class="small mut" style="margin-top:6px">${esc(a.required_artifacts.join(' · '))}</div>
       </div>
     </div>
     <div class="btnrow">
-      <label style="margin:0;flex:1"><input id="u-${a.kind}" placeholder="Ссылка на исходник / файл (успех = ссылка)" value="${esc(cur.source_url||'')}"></label>
-      <button class="sec" onclick="aiDraft(${s.id},'${a.kind}',this)">✨ AI-черновик</button>
-      <button onclick="saveArt(${s.id},'${a.kind}')">Сохранить (v${(cur.version||1)+1})</button>
-    </div></div>`;
+      <label style="margin:0;flex:1"><input id="u-${a.kind}" placeholder="Ссылка на внешнее доказательство (Confluence, репозиторий) — необязательно" value="${esc(cur.source_url||'')}" ${dis}></label>
+      <button class="sec" onclick="aiDraft(${s.id},'${a.kind}',this)" ${dis}>✨ AI-черновик${diagBoost?' + диаграмма':''}</button>
+      <button onclick="saveArt(${s.id},'${a.kind}')" ${dis}>Сохранить (v${(cur.version||1)+1})</button>
+    </div></details>`;
   }).join('');
-  // первичный рендер превью
-  arts.forEach(a => { const cur = byKind[a.kind]||{}; renderDiag(document.getElementById('dv-'+a.kind), cur.diagram_code||''); });
+  // первичный рендер превью — только у видов с диаграммами
+  arts.forEach(a => {
+    if(DIAG_KINDS.includes(a.kind))
+      renderDiag(document.getElementById('dv-'+a.kind), (byKind[a.kind]||{}).diagram_code||'');
+  });
+  if(ART_JUMP){ const k = ART_JUMP; ART_JUMP = null; artJump(k); }
+}
+/* Переход к артефакту из индекса/галереи: раскрыть карточку и проскроллить к ней */
+function artJump(kind){
+  const d = document.getElementById('art-'+kind);
+  if(!d) return;
+  d.open = true;
+  d.scrollIntoView({behavior:'smooth', block:'start'});
 }
 async function saveArt(sid, kind){
-  await api(`/services/${sid}/artifacts/${kind}`, {method:'PUT', body: JSON.stringify({
-    content_md:$(`#a-${kind}`).value, source_url:$(`#u-${kind}`).value,
-    diagram_code:$(`#d-${kind}`).value})});
-  toast('Артефакт и диаграмма сохранены, версия поднята'); viewService(sid,'artifacts');
+  const dEl = document.getElementById('d-'+kind);
+  const body = {content_md:$(`#a-${kind}`).value, source_url:$(`#u-${kind}`).value};
+  if(dEl && !dEl.readOnly) body.diagram_code = dEl.value;   // vision_c4 — производная редактора; у остальных поле отсутствует
+  await api(`/services/${sid}/artifacts/${kind}`, {method:'PUT', body: JSON.stringify(body)});
+  toast('Артефакт сохранён, версия поднята');
+  // после перерисовки карточка заполненного артефакта свернётся по умолчанию —
+  // возвращаем пользователя к сохранённой карточке, а не к стене/индексу
+  ART_JUMP = kind;
+  viewService(sid,'artifacts');
 }
 async function aiDraft(sid, kind, btn){
   const old = btn ? btn.textContent : '';
+  // перезапись несохранённой диаграммы — с подтверждением (ревью 2026-11-07)
+  const dEl = document.getElementById('d-'+kind);
+  if(dEl && !dEl.readOnly && dEl.value.trim() &&
+     !confirm('Текущая (несохранённая) диаграмма будет заменена AI-черновиком. Продолжить?')){
+    if(btn){ btn.disabled = false; btn.textContent = old; }
+    return;
+  }
   if(btn){ btn.disabled = true; btn.textContent = '✨ Генерирую…'; }
   try{
     const r = await api('/ai/draft', {method:'POST', body: JSON.stringify({
       service_id:sid, kind, model: chatModelSel()})});
     $(`#a-${kind}`).value = r.content_md;
+    let diagNote = '';
+    const dEl = document.getElementById('d-'+kind);
+    if(r.diagram_code && dEl && !dEl.readOnly){
+      dEl.value = r.diagram_code;                       // черновик диаграммы (deployment/data_model)
+      renderDiag(document.getElementById('dv-'+kind), r.diagram_code);
+      diagNote = ' + черновик диаграммы';
+    }
     toast(r.provider === 'ai-buddy'
-      ? `AI-черновик (${esc(r.model||'AI-Buddy')}) вставлен — <b>требует подтверждения автора</b> (BR-28/33)`
-      : esc(r.note || 'Черновик вставлен — требует подтверждения автора (BR-28/33)'));
+      ? `AI-черновик${diagNote} (${esc(r.model||'AI-Buddy')}) вставлен — <b>требует подтверждения автора</b> (BR-28/33)`
+      : esc((r.note || 'Черновик вставлен — требует подтверждения автора (BR-28/33)')) + diagNote);
   }catch(e){ toast(esc(e.message), true); }
   if(btn){ btn.disabled = false; btn.textContent = old; }
 }
@@ -360,68 +557,66 @@ async function scaffoldArtifacts(sid, btn){
   btn.disabled = false; btn.textContent = '⚡ Сгенерировать скелеты обязательных артефактов';
 }
 
-function tabCheck(s){
-  const last = s.last_answers || [];
-  const ans = Object.fromEntries(last.map(a=>[a.item_id, a]));
-  const runs = s.checklist_runs[0];
-  $('#tabbody').innerHTML = `
-  <div class="card" style="margin-bottom:14px"><div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap">
-    <div><div class="mut small">Текущий скор</div><div class="kpi">${runs?.score_pct||0}%</div></div>
-    <div><div class="mut small">Обязательных не закрыто</div><div class="kpi" style="color:${runs?.mandatory_missing?'var(--bad)':'var(--ok)'}">${runs?.mandatory_missing??'—'}</div></div>
-    <div style="flex:1"></div>
-    <button class="cya" onclick="aiPrecheck(${s.id})">✨ AI-prediction (BR-29)</button>
-    <button onclick="submitCheck(${s.id})">Пройти self-check →</button>
-  </div><div id="ai-pre"></div></div>
-  <div class="card"><table><tr><th>#</th><th>Пункт</th><th>Критерий «есть»</th><th>Вес</th><th>Оценка</th><th>Ссылка</th></tr>
-  ${S.standard.checklist.map(it=>{
-    const a = ans[it.id]||{};
-    return `<tr><td>${it.id}</td><td><b>${esc(it.item)}</b></td><td class="small mut">${esc(it.expected)}</td><td>${weightB(it.weight)}</td>
-    <td><select id="g-${it.id}" style="width:110px">${['N','Ch','E'].map(g=>`<option ${a.grade===g?'selected':''} value="${g}">${{N:'Нет',Ch:'Частично',E:'Есть'}[g]}</option>`).join('')}</select></td>
-    <td><input id="l-${it.id}" value="${esc(a.link||'')}" placeholder="ссылка обязательна"></td></tr>`;}).join('')}
-  </table><p class="small mut" style="margin-top:10px">Правило стандарта: пункт без ссылки не считается пройденным → «Есть» автоматически понижается до «Частично». Порог ревью: все обязательные пункты = «Есть».</p></div>`;
-}
-function collectCheck(){
-  return S.standard.checklist.map(it => ({item_id: it.id, grade: $(`#g-${it.id}`).value, link: $(`#l-${it.id}`).value}));
-}
-async function submitCheck(sid){
-  try{
-    const r = await api(`/services/${sid}/checklist`, {method:'POST', body: JSON.stringify({answers:collectCheck()})});
-    toast(`Self-check: <b>${r.score_pct}%</b> · блокирующих: ${r.mandatory_missing} → ${r.verdict==='ready_for_review'?'<b style="color:var(--ok)">готов к ревью</b>':'<b style="color:var(--bad)">не готов</b>'}`, r.verdict!=='ready_for_review');
-    viewService(sid,'check');
-  }catch(e){ toast(esc(e.message), true); }
-}
-async function aiPrecheck(sid){
-  const r = await api('/ai/precheck', {method:'POST', body: JSON.stringify({service_id:sid})});
-  $('#ai-pre').innerHTML = `<div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
-    <b style="color:var(--cyan)">AI Gate · прогноз чек-листа</b> <span class="badge b-draft">${r.provider} · advisory</span>
-    <div class="small mut" style="margin:6px 0">${r.predictions.filter(p=>p.predicted!=='E').length} пунктов требует внимания</div>
-    ${r.issues.map(i=>`<div class="chip">⚠ <b>${esc(i.item)}</b> — ${esc(i.hint)} ${i.severity==='blocking'?'<b style="color:var(--bad)">блокер</b>':''}</div>`).join('')}
-    <div class="small mut" style="margin-top:8px">Recommendation: заполните артефакты и приложите ссылки — затем пройдите self-check вручную. Решение за человеком (BR-33).</div></div>`;
-}
 
 function tabReview(s){
-  const expertNote = S.user.role==='domain_expert' && s.review_status==='in_review';
+  const canSend = canEditSvc(s);                       // бэкенд: can_edit_service
+  const canDecide = !!s.can_decide_review && s.review_status==='in_review' && s.reviews.find(r=>r.status==='in_review');
   const open = s.reviews.find(r=>r.status==='in_review');
   $('#tabbody').innerHTML = `
-  <div class="card vio" style="margin-bottom:14px"><h2 style="margin-top:0">Workflow ревью</h2>
-    <p class="small mut">draft → in_review → approved / changes_requested. Gate: self-check без блокирующих обязательных пунктов.</p>
+  <div class="card vio" style="margin-bottom:14px"><h2 style="margin-top:0">Готовность к ревью</h2>
+    <div id="svc-readiness"><p class="small mut">Считаю по данным сервиса…</p></div>
+    <p class="small mut" style="margin-top:10px">draft → in_review → approved / changes_requested.
+    Готовность вычисляется автоматически из артефактов, хранящихся в DeepArch; при отправке
+    система сама фиксирует проверку (история сохраняется). Решение — за ревьюером (BR-33).</p>
     <div class="btnrow">
       ${s.review_status==='in_review'
         ? `<span class="chip">Ревью идёт · запрошено <b>${esc(open?.requested_by||'')}</b></span>`
-        : `<button onclick="requestReview(${s.id})">Отправить на ревью</button>`}
-      ${expertNote?`
+        : `<button id="btn-send-review" onclick="requestReview(${s.id})" ${canSend?'':'disabled'}>Отправить на ревью</button>
+           ${canSend?'':'<span class="small mut">Отправка на ревью: владелец/архитектор или product-группа</span>'}`}
+      ${canDecide?`
         <button class="btn-ok" onclick="decide(${open.id},'approved')">✓ Approved</button>
         <button class="btn-bad" onclick="decide(${open.id},'changes_requested')">✗ Changes requested</button>`:''}
     </div>
-    ${expertNote?`<textarea class="sm" id="rv-comment" placeholder="Комментарий решения (необязательно)"></textarea>`:''}
+    ${canDecide?`<textarea class="sm" id="rv-comment" placeholder="Комментарий решения (необязательно)"></textarea>`:''}
   </div>
   <div class="card"><table><tr><th>#</th><th>Запрошено</th><th>Ревьюер</th><th>Решение</th><th>Комментарий</th></tr>
   ${s.reviews.map(r=>`<tr><td>${r.id}</td>
     <td class="small">${esc(r.requested_by)}<br><span class="mut">${new Date(r.requested_at*1000).toLocaleString('ru')}</span></td>
     <td>${esc(r.reviewer||'—')}</td><td>${statusB(r.status)}</td><td class="small mut">${esc(r.comment||'')}</td></tr>`).join('')||'<tr><td colspan=5 class="mut">Ревью ещё не было</td></tr>'}
   </table></div>`;
+  svcReadiness(s.id);
+}
+/* Живой ответ на «всё ли у меня есть перед отправкой на ревью?» — расчёт бэкенда по данным DeepArch */
+async function svcReadiness(sid){
+  const el = document.getElementById('svc-readiness'); if(!el) return;
+  try{
+    const r = await api(`/services/${sid}/readiness`);
+    const chip = i => i.grade === 'E'
+      ? `<span class="chip" style="background:#ecfdf5;color:#047857">✓ <a class="lnk" style="color:inherit" href="${i.link}">${esc(i.item)}</a></span>`
+      : `<span class="chip" style="background:${i.blocking?'#fff1f2;color:#be123c':'var(--surface2);color:#52525b'}">
+         ${i.blocking?'✗':'○'} <a class="lnk" style="color:inherit" href="${i.link}">${esc(i.item)}</a>${i.blocking?' · блокер':i.matrix==='desired'?' · желательный':' · не обязателен'}</span>`;
+    const missing = r.items.filter(i => i.blocking);
+    const approved = SERVICE && SERVICE.review_status==='approved';
+    el.innerHTML = `
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:4px 0 10px">
+        <span class="badge ${r.ready?'b-approved':'b-draft'}" style="font-size:13px">
+          ${r.ready?'✓ Готов к отправке на ревью':'✗ Не готов: не закрыто обязательных — '+missing.length}</span>
+        <span class="small mut">предварительная готовность ${r.score_pct}%</span>
+        ${r.last_run?`<span class="small mut">· последняя фиксация: ${new Date(r.last_run.created_at*1000).toLocaleDateString('ru')} — ${r.last_run.score_pct}% (${esc(r.last_run.created_by||'')})</span>`:''}
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">${r.items.map(chip).join('')}</div>
+      ${r.ready ? '' : `<p class="small" style="margin:10px 0 0">Отправка заблокируется на: <b>${r.blockers.map(esc).join('; ')}</b> — заполните соответствующие артефакты.</p>`}
+      ${approved?`<p class="small" style="margin:10px 0 0">Сервис уже approved — повторная отправка перезапустит процесс ревью.</p>`:''}`;
+    const btn = document.getElementById('btn-send-review');
+    if(btn && !r.ready){
+      btn.disabled = true;
+      btn.title = 'Не закрыто обязательных пунктов: ' + r.blockers.join('; ');
+    }
+  }catch(e){ el.innerHTML = `<p class="small mut">Готовность недоступна: ${esc(e.message)}</p>`; }
 }
 async function requestReview(sid){
+  if(SERVICE && SERVICE.id===sid && SERVICE.review_status==='approved'
+     && !confirm('Сервис уже approved — повторная отправка перезапустит процесс ревью. Продолжить?')) return;
   try{
     await api(`/services/${sid}/reviews`, {method:'POST', body:'{}'});
     toast('Отправлено на ревью к эксперту домена'); viewService(sid,'review');
@@ -495,7 +690,7 @@ const PRIO_BADGE = {P0:'b-changes_requested', P1:'b-in_review', P2:'b-mandatory'
 const RISK_BADGE = {Critical:'b-changes_requested', High:'b-in_review', Medium:'b-mandatory', Low:'b-draft'};
 function debtRow(d, withService){
   return `<tr>
-    <td><span class="badge ${d.dtype==='AD'?'b-changes_requested':'b-mandatory'}">${d.dtype}</span>
+    <td style="white-space:nowrap"><span class="badge ${d.dtype==='AD'?'b-changes_requested':'b-mandatory'}">${d.dtype}</span>
         <b class="small">${esc(d.debt_id)}</b></td>
     <td><b>${esc(d.title)}</b>${withService&&d.service_code?`<div class="small mut">${esc(d.service_code)} · ${esc(d.service_name||'')}</div>`:''}</td>
     <td><span class="badge ${RISK_BADGE[d.risk]||'b-draft'}">${esc(d.risk)}</span><div class="small mut">Ds ${d.probability}×${d.damage}=${d.ds}</div></td>
@@ -615,7 +810,7 @@ function tabFitness(s){
   $('#tabbody').innerHTML = `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h2 style="margin-top:0">Fitness functions — автопроверка правил архитектуры (BR-41…42)</h2>
-      <button onclick="runFitness(${s.id})">▶ Прогнать проверки</button></div>
+      <button onclick="runFitness(${s.id})" ${canEditSvc(s)?'':'disabled title="Нет прав на изменение сервиса"'}>▶ Прогнать проверки</button></div>
     <p class="small mut">Правила — проверяемые утверждения стандарта (pageId=894079737): исходники диаграмм,
     3+ эндпоинта API, NFR в цифрах, ADR-001…005, docker compose. blocker проваливает прогон, warning — нет.</p>
     ${last?`<div class="btnrow" style="margin:10px 0">
@@ -658,11 +853,12 @@ async function downloadCi(sid){
 const METRIC_RU = {rps:'RPS (пиковый)', p95_ms:'Время ответа p95, ms', sla_pct:'SLA, %',
                    rto_h:'RTO, ч', rpo_min:'RPO, мин'};
 function tabNfr(s){
+  const ed = canEditSvc(s);
   const nfr = s.nfr || {metrics:[]};
   $('#tabbody').innerHTML = `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <h2 style="margin-top:0">NFR-валидация: цель vs факт (BR-51…53)</h2>
-      <button onclick="nfrExtract(${s.id})">⇣ Извлечь цели из артефакта NFR</button></div>
+      <button onclick="nfrExtract(${s.id})" ${ed?'':'disabled title="Нет прав на изменение сервиса"'}>⇣ Извлечь цели из артефакта NFR</button></div>
     <p class="small mut">Цели (RPS, p95, SLA, RTO, RPO) извлекаются из артефакта «NFR &amp; Security»;
     факт вносится по данным нагрузочного стенда / мониторинга. breach — факт хуже цели.</p>
     <div class="btnrow" style="margin:10px 0">
@@ -673,10 +869,10 @@ function tabNfr(s){
       ${nfr.metrics.map(m=>`<tr>
         <td><b>${METRIC_RU[m.metric]||esc(m.metric)}</b></td>
         <td>${m.target_value!=null?`<code>${m.target_value}</code>`:'—'}${m.target_note?`<div class="small mut">${esc(m.target_note)}</div>`:''}</td>
-        <td><input id="nfr-act-${m.id}" type="number" step="any" value="${m.actual_value??''}" style="width:110px" placeholder="факт"></td>
+        <td><input id="nfr-act-${m.id}" type="number" step="any" value="${m.actual_value??''}" style="width:110px" placeholder="факт" ${ed?'':'disabled'}></td>
         <td><span class="badge ${VERDICT_BADGE[m.status]||'b-draft'}">${m.status}</span><div class="small mut">${esc(m.detail||'')}</div></td>
         <td class="small mut">${esc(m.source||'—')}</td>
-        <td><button class="sec" onclick="nfrSave(${m.id})">Сохранить</button></td></tr>`).join('')}</table>`
+        <td><button class="sec" onclick="nfrSave(${m.id})" ${ed?'':'disabled'}>Сохранить</button></td></tr>`).join('')}</table>`
       :'<p class="mut">Метрик нет — извлеките цели из артефакта NFR или заполните артефакт цифрами.</p>'}
   </div>`;
 }
@@ -708,6 +904,7 @@ function artTitle(kind){
 }
 
 function tabReqs(s){
+  const ed = canEditSvc(s);
   const rs = s.requirements || [];
   const nF = rs.filter(r => r.req_type === 'func').length, nN = rs.length - nF;
   const uncovered = rs.filter(r => !(r.covered_by || []).length).length;
@@ -721,24 +918,24 @@ function tabReqs(s){
     NFR profile, а покрытие (упоминание ФТ-N в артефактах) показывает, что ни одно
     требование не потерялось.</p>
     <div class="btnrow">
-      <button class="cya" onclick="reqNfrDraft(${s.id}, this)">⇥ Сгенерировать NFR profile из НФТ</button>
+      <button class="cya" onclick="reqNfrDraft(${s.id}, this)" ${ed?'':'disabled title="Нет прав на изменение сервиса"'}>⇥ Сгенерировать NFR profile из НФТ</button>
       <span class="small mut">${nF} ФТ · ${nN} НФТ${uncovered?` · <b style="color:var(--bad)">не покрыто: ${uncovered}</b>`:''}</span>
     </div>
-    <div style="margin:12px 0 6px"><button class="sec" onclick="reqToggleParse()">🧠 Вставить документ требований</button></div>
+    <div style="margin:12px 0 6px"><button class="sec" onclick="reqToggleParse()" ${ed?'':'disabled'}>🧠 Вставить документ требований</button></div>
     <div id="req-parse" style="display:none">
       <textarea id="req-doc" rows="8" style="width:100%"
         placeholder="Вставьте текст ФТ/НФТ из Confluence, Jira или документа…"></textarea>
-      <div class="btnrow"><button onclick="reqParse(${s.id})">🧠 Разобрать документ</button>
+      <div class="btnrow"><button onclick="reqParse(${s.id})" ${ed?'':'disabled'}>🧠 Разобрать документ</button>
       <span class="small mut" id="req-parse-note"></span></div>
       <div id="req-preview"></div>
     </div>
     <label style="margin-top:12px">Добавить вручную</label>
     <div class="grid g2">
-      <select id="req-type"><option value="func">ФТ — функция</option><option value="nonfunc">НФТ — качество</option></select>
-      <input id="req-src" placeholder="Источник: Confluence / Jira (ссылка)">
+      <select id="req-type" ${ed?'':'disabled'}><option value="func">ФТ — функция</option><option value="nonfunc">НФТ — качество</option></select>
+      <input id="req-src" placeholder="Источник: Confluence / Jira (ссылка)" ${ed?'':'disabled'}>
     </div>
-    <textarea id="req-text" rows="2" style="width:100%;margin-top:6px" placeholder="Текст требования"></textarea>
-    <div class="btnrow"><button onclick="reqAdd(${s.id})">＋ Добавить требование</button></div>
+    <textarea id="req-text" rows="2" style="width:100%;margin-top:6px" placeholder="Текст требования" ${ed?'':'disabled'}></textarea>
+    <div class="btnrow"><button onclick="reqAdd(${s.id})" ${ed?'':'disabled title="Нет прав на изменение сервиса"'}>＋ Добавить требование</button></div>
   </div>
   <div class="card">
     <h2 style="margin-top:0">Реестр требований</h2>
@@ -747,13 +944,13 @@ function tabReqs(s){
       <td><span class="badge ${REQ_TYPE_BADGE[r.req_type]}">${REQ_TYPE_RU[r.req_type]}</span>
           <div class="small mut" style="margin-top:2px"><b>${esc(r.ext_id||'')}</b>${r.source_url?`<br><a class="lnk" href="${esc(r.source_url)}" target="_blank">источник ↗</a>`:''}</div></td>
       <td style="max-width:340px">${esc(r.text)}</td>
-      <td><select onchange="reqStatus(${r.id}, this.value)">
+      <td><select onchange="reqStatus(${r.id}, this.value)" ${ed?'':'disabled'}>
         ${['new','in_work','covered'].map(st => `<option value="${st}" ${st===r.status?'selected':''}>${REQ_STATUS_RU[st]}</option>`).join('')}
       </select></td>
       <td>${(r.covered_by||[]).length
         ? r.covered_by.map(k => `<span class="badge b-approved" title="${esc(artTitle(k))}">${esc(k)}</span>`).join(' ')
         : '<span class="badge b-N">не покрыто</span>'}</td>
-      <td><button class="sec" onclick="reqDel(${r.id}, ${s.id})" title="Удалить">✕</button></td></tr>`).join('')}
+      <td><button class="sec" onclick="reqDel(${r.id}, ${s.id})" title="Удалить" ${ed?'':'disabled'}>✕</button></td></tr>`).join('')}
     </table>` : '<p class="mut">Требований пока нет — вставьте документ или добавьте вручную. Затем откройте «Артефакты»: AI-черновик учтёт требования.</p>'}
   </div></div>`;
 }
@@ -845,6 +1042,422 @@ async function reqNfrDraft(sid, btn){
   }catch(e){ toast(esc(e.message), true); btn.disabled = false; btn.textContent = '⇥ Сгенерировать NFR profile из НФТ'; }
 }
 
+/* ---------- Проектирование: визуальный C4-редактор (L1/L2) ---------- */
+const C4_TYPES = [
+  {t:'person',    ru:'Персона',          icon:'👤', fill:'#eef2ff', line:'#6366f1', dash:''},
+  {t:'system',    ru:'Наша система',     icon:'🖥️', fill:'#ecfdf5', line:'#10b981', dash:''},
+  {t:'external',  ru:'Внешняя система',  icon:'☁️', fill:'#fff7ed', line:'#f59e0b', dash:'6 3'},
+  {t:'container', ru:'Контейнер',        icon:'📦', fill:'#f0f9ff', line:'#0ea5e9', dash:''},
+  {t:'db',        ru:'База данных',      icon:'🗄️', fill:'#fdf4ff', line:'#c026d3', dash:''}
+];
+const C4_TYPE = Object.fromEntries(C4_TYPES.map(x => [x.t, x]));
+const C4_W = 160, C4_H = 64, C4_GRID = 20;   // GRID — шаг сетки и привязки (snap)
+const c4Snap = v => Math.round(v / C4_GRID) * C4_GRID;
+const C4_VIEWS = {context: 'Контекст (L1)', container: 'Контейнеры (L2)'};
+let DSGN = {sid: null, models: {}, view: 'context', sel: null, selType: null, linkFrom: null,
+            saveT: null, pending: null, zoom: 1};
+
+const c4M = () => DSGN.models[DSGN.view];
+const c4Node = id => c4M() && (c4M().nodes || []).find(n => n.id === id);
+const c4Edge = id => c4M() && (c4M().edges || []).find(e => e.id === id);
+
+async function tabDesign(s){
+  c4FlushSave();                      // недосейвенный вид предыдущего сервиса уходит под своим {sid, view}
+  DSGN.sid = s.id; DSGN.sel = null; DSGN.selType = null; c4CancelLink();
+  DSGN.readonly = !canEditSvc(s);     // viewer/infosec/чужой сервис: без правок и автосейва
+  const r = await api(`/services/${s.id}/c4`).catch(() => ({models: {}}));
+  DSGN.models = r.models || {};
+  for(const v of Object.keys(C4_VIEWS))
+    if(!DSGN.models[v]) DSGN.models[v] = {nodes: [], edges: []};
+  DSGN.view = DSGN.models.context.nodes.length ? 'context'
+            : DSGN.models.container.nodes.length ? 'container' : 'context';
+  $('#tabbody').innerHTML = `
+  <div class="card c4-toolbar">
+    <div class="c4-toolbar-row">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <b>Проектирование архитектуры — C4</b>
+        <button class="c4-help" onclick="c4HelpToggle(this)" title="Как работает проектирование"
+          aria-expanded="false" aria-controls="c4-help">?</button>
+        ${DSGN.readonly?'<span class="badge b-in_review small-badge">🔒 только просмотр</span>':''}
+      </div>
+      <div class="btnrow">
+        <button class="c4-aibtn" onclick="c4AI('${DSGN.view}', this)" ${DSGN.readonly?'disabled title="Нет прав на изменение сервиса"':''}>🧠 AI-структура</button>
+        <button class="sec" onclick="c4Preview(this)">👁 Mermaid</button>
+      </div>
+    </div>
+    <p class="c4-help-text small mut" id="c4-help" hidden>Сценарий 1 — рисуйте вручную палитрой слева.
+      Сценарий 2 — «AI-структура» спроектирует модель из требований и фактов сервиса
+      (для контейнеров — в согласии с уже сохранённой L1), затем правьте её же редактором.
+      Модель хранится как JSON и при сохранении сама синхронизирует Mermaid-исходник
+      в артефакт Vision — готовность к ревью и галерея диаграмм ниже видят L1/L2 сразу.</p>
+  </div>
+  <div class="design-shell">
+    <div class="c4-side">
+      <b class="c4-cap">Палитра</b>
+      <div class="c4-palette">
+        ${C4_TYPES.map(x => `<button onclick="c4Add('${x.t}')" title="Добавить: ${x.ru}" ${DSGN.readonly?'disabled':''}>${x.icon} ${x.ru}</button>`).join('')}
+      </div>
+      <p class="small mut" style="margin:auto 0 0;padding-top:10px">Модель хранится как JSON<br>и сохраняется автоматически.</p>
+    </div>
+    <div class="c4-main">
+      <div class="c4-head">
+        <div id="c4-chips" class="c4-chips"></div>
+        <div class="c4-headbtns">
+          <div class="c4-views" role="tablist">
+            ${Object.entries(C4_VIEWS).map(([v, t]) =>
+              `<button class="${v===DSGN.view?'c4-vact':''}" data-view="${v}" onclick="c4SetView('${v}')" role="tab">${t}</button>`).join('')}
+          </div>
+          <button class="sec c4-ibtn" id="c4-linkbtn" onclick="c4LinkMode()" title="Режим связи: кликните источник, затем цель">🔗</button>
+          <button class="sec c4-ibtn" onclick="c4DeleteSel()" title="Удалить выбранное (Delete)">🗑</button>
+          <span class="c4-zoom">
+            <button onclick="c4Zoom(-1)" title="Уменьшить">−</button>
+            <button class="c4-zlbl" id="c4-zlbl" onclick="c4Zoom(0)" title="Сбросить масштаб">100%</button>
+            <button onclick="c4Zoom(1)" title="Увеличить">＋</button>
+          </span>
+        </div>
+      </div>
+      <div class="c4-canvas">
+        <svg id="c4-svg" viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <pattern id="c4-grid" width="20" height="20" patternUnits="userSpaceOnUse">
+              <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#e2e8f0" stroke-width="1"/>
+            </pattern>
+            <marker id="c4-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+              markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker>
+          </defs>
+          <rect width="960" height="560" fill="#fff"/>
+          <rect width="960" height="560" fill="url(#c4-grid)"/>
+          <g id="c4-g"></g>
+        </svg>
+        <div id="c4-empty" class="c4-empty">
+          <div class="c4-empty-ic">📐</div>
+          <b>Модель ${esc(C4_VIEWS[DSGN.view])} пуста</b>
+          <p class="small mut">Добавьте элементы палитрой слева — или доверьте черновик AI<br>и правьте его прямо на холсте.</p>
+          <div class="btnrow">
+            <button class="c4-aibtn" onclick="c4AI('${DSGN.view}', this)" ${DSGN.readonly?'disabled':''}>🧠 AI-структура</button>
+            <button class="sec" onclick="c4Add('system')" ${DSGN.readonly?'disabled':''}>🖥 Наша система</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="c4-props-col">
+      <b class="c4-cap">Свойства</b>
+      <div id="c4-props"></div>
+    </div>
+  </div>
+  <div id="c4-gallery"></div>
+  <pre id="c4-preview" class="chatcode" style="display:none;margin-top:12px;max-height:300px;overflow:auto"></pre>`;
+  c4Draw(); c4Props(); c4Status();
+  DSGN.zoom = 1;                      // зум — настройка экрана, между сервисами не переносится
+  c4ApplyZoom();
+  c4BindSvg();
+  c4Gallery(s);
+}
+
+/* Галерея диаграмм из артефактов — «взгляд читателя» внутри «Проектирования»
+   (таб «Диаграммы» слит сюда): видеть картинки, не открывая редактор и тексты */
+function c4Gallery(s){
+  const el = document.getElementById('c4-gallery'); if(!el) return;
+  const byKind = Object.fromEntries(s.artifacts.map(a=>[a.kind,a]));
+  const withDiag = S.standard.artifacts.filter(a=>(byKind[a.kind]?.diagram_code||'').trim());
+  el.innerHTML = `<div class="card" style="margin-top:12px">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+      <b>Диаграммы сервиса</b>
+      <span class="small mut">исходник = единый источник правды, картинка вторична</span>
+    </div>
+    ${withDiag.length ? withDiag.map(a=>`
+      <div style="margin-top:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <b class="small">${esc(a.title)}</b>
+          <a class="lnk small" href="#/service/${s.id}/artifacts" onclick="if(event.button===0&&!event.metaKey&&!event.ctrlKey)ART_JUMP='${a.kind}'">редактировать →</a>
+        </div>
+        <div class="diag" id="dvg-${a.kind}"></div>
+      </div>`).join('')
+    : '<p class="mut small" style="margin:10px 0 0">Диаграмм пока нет: нарисуйте C4-модель выше — Mermaid-исходник уйдёт в артефакт Vision сам; остальные диаграммы (erDiagram, deployment) добавляются в «Артефактах».</p>'}
+  </div>`;
+  withDiag.forEach(a => renderDiag(document.getElementById('dvg-'+a.kind), byKind[a.kind].diagram_code));
+}
+
+/* пояснение «?» в тулбаре: показывается по клику/с клавиатуры, а не только в title */
+function c4HelpToggle(btn){
+  const el = document.getElementById('c4-help');
+  if(!el) return;
+  el.hidden = !el.hidden;
+  btn.setAttribute('aria-expanded', String(!el.hidden));
+}
+
+function c4SetView(v){
+  c4FlushSave();                      // правки текущего вида сохраняются до переключения
+  DSGN.view = v; DSGN.sel = null; DSGN.selType = null; c4CancelLink();
+  document.querySelectorAll('.c4-views button').forEach(b => b.classList.toggle('c4-vact', b.dataset.view === v));
+  document.querySelectorAll('.c4-aibtn').forEach(b => b.setAttribute('onclick', `c4AI('${v}', this)`));
+  const em = document.getElementById('c4-empty');
+  if(em) em.querySelector('b').textContent = `Модель ${C4_VIEWS[v]} пуста`;
+  c4Draw(); c4Props(); c4Status();
+}
+
+function c4Draw(){
+  const g = document.getElementById('c4-g'); if(!g) return;
+  const m = c4M();
+  const center = n => ({x: n.x + C4_W/2, y: n.y + C4_H/2});
+  const trim = (a, b) => {   // обрезка линии по границам прямоугольников
+    const dx = b.x - a.x, dy = b.y - a.y;
+    if(!dx && !dy) return {a, b};
+    const t = Math.min(dx ? (C4_W/2) / Math.abs(dx) : 1e9, dy ? (C4_H/2) / Math.abs(dy) : 1e9);
+    return {a: {x: a.x + dx * t, y: a.y + dy * t}, b: {x: b.x - dx * t, y: b.y - dy * t}};
+  };
+  let edges = '';
+  for(const e of (m.edges || [])){
+    const f = c4Node(e.from), t = c4Node(e.to);
+    if(!f || !t) continue;
+    const p = trim(center(f), center(t));
+    const selE = DSGN.selType === 'edge' && DSGN.sel === e.id;
+    const lbl = esc(e.label || 'взаимодействует');
+    edges += `<line data-eid="${esc(e.id)}" x1="${p.a.x}" y1="${p.a.y}" x2="${p.b.x}" y2="${p.b.y}"
+      stroke="${selE ? '#e11d48' : '#64748b'}" stroke-width="${selE ? 3 : 1.6}" marker-end="url(#c4-arrow)"/>
+      <line data-eid="${esc(e.id)}" x1="${p.a.x}" y1="${p.a.y}" x2="${p.b.x}" y2="${p.b.y}"
+      stroke="transparent" stroke-width="12"/>
+      <text x="${(p.a.x + p.b.x)/2}" y="${(p.a.y + p.b.y)/2 - 5}" text-anchor="middle"
+      font-size="10.5" fill="#334155" style="paint-order:stroke" stroke="#f8fafc" stroke-width="4"
+      font-weight="600">${lbl}${e.tech ? ` · ${esc(e.tech)}` : ''}</text>`;
+  }
+  let nodes = '';
+  for(const n of (m.nodes || [])){
+    const ty = C4_TYPE[n.type] || C4_TYPE.container;
+    const selN = DSGN.selType === 'node' && DSGN.sel === n.id;
+    const isLinkFrom = DSGN.linkFrom === n.id;
+    const nm = n.name.length > 24 ? n.name.slice(0, 23) + '…' : n.name;
+    nodes += `<g data-nid="${esc(n.id)}" transform="translate(${n.x},${n.y})"${isLinkFrom?' class="c4-src"':''}>
+      <rect width="${C4_W}" height="${C4_H}" rx="10" fill="${ty.fill}"
+        stroke="${selN || isLinkFrom ? '#e11d48' : ty.line}" stroke-width="${selN || isLinkFrom ? 3 : ty.t==='system'?2.4:1.6}"
+        ${ty.dash ? `stroke-dasharray="${ty.dash}"` : ''}/>
+      <text x="${C4_W/2}" y="22" text-anchor="middle" font-size="14">${ty.icon}</text>
+      <text x="${C4_W/2}" y="39" text-anchor="middle" font-size="12" font-weight="700" fill="#0f172a">${esc(nm)}</text>
+      <text x="${C4_W/2}" y="54" text-anchor="middle" font-size="9.5" fill="#475569">${esc((n.tech || ty.ru).slice(0, 26))}</text>
+    </g>`;
+  }
+  g.innerHTML = edges + nodes;
+  const em = document.getElementById('c4-empty');
+  if(em) em.classList.toggle('show', !(m.nodes || []).length);
+}
+
+function c4Point(e){
+  const svg = document.getElementById('c4-svg');
+  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  return pt.matrixTransform(svg.getScreenCTM().inverse());
+}
+
+let C4DRAG = null;
+function c4BindSvg(){
+  const svg = document.getElementById('c4-svg'); if(!svg) return;
+  svg.onmousedown = e => {
+    const eg = e.target.closest('[data-eid]');
+    if(eg && !c4LinkOn()){          // в режиме связи клики по связям игнорируем — работаем с узлами
+      DSGN.sel = eg.dataset.eid; DSGN.selType = 'edge';
+      c4Draw(); c4Props(); return;
+    }
+    const ng = e.target.closest('[data-nid]');
+    if(!ng){ c4CancelLink(); c4Draw(); c4Sel(null); return; }
+    const n = c4Node(ng.dataset.nid);
+    const p = c4Point(e);
+    C4DRAG = {id: n.id, sx: p.x, sy: p.y, ox: n.x, oy: n.y, moved: false};
+    e.preventDefault();
+  };
+  svg.onmousemove = e => {
+    if(!C4DRAG) return;
+    const n = c4Node(C4DRAG.id); if(!n) return;
+    const p = c4Point(e);
+    const dx = p.x - C4DRAG.sx, dy = p.y - C4DRAG.sy;
+    if(Math.abs(dx) + Math.abs(dy) > 3) C4DRAG.moved = true;
+    n.x = Math.max(0, Math.min(960 - C4_W, c4Snap(C4DRAG.ox + dx)));
+    n.y = Math.max(0, Math.min(560 - C4_H, c4Snap(C4DRAG.oy + dy)));
+    c4Draw();
+  };
+  svg.onmouseup = () => {
+    if(C4DRAG && !C4DRAG.moved){
+      const id = C4DRAG.id;
+      if(c4LinkOn() && !DSGN.linkFrom){          // первый клик — источник связи
+        DSGN.linkFrom = id; c4Draw(); c4Status();
+      } else if(DSGN.linkFrom && DSGN.linkFrom !== id){   // второй клик — цель: создаём связь
+        const m = c4M();
+        m.edges.push({id: 'e' + Date.now(), from: DSGN.linkFrom, to: id, label: '', tech: ''});
+        c4CancelLink();
+        c4Draw(); c4Props(); c4Status(); c4SaveSoon();
+      } else if(DSGN.linkFrom){                  // клик по самому источнику — отмена
+        c4CancelLink(); c4Draw(); c4Status();
+      } else { c4Sel(id, 'node'); }
+    } else if(C4DRAG && C4DRAG.moved){ c4SaveSoon(); }
+    C4DRAG = null;
+  };
+  svg.onmouseleave = () => { if(C4DRAG && C4DRAG.moved) c4SaveSoon(); C4DRAG = null; };
+}
+
+document.addEventListener('keydown', e => {
+  if(!document.getElementById('c4-svg')) return;
+  if(e.target.matches('input,textarea,select')) return;
+  // удаление по клавише — только когда фокус на холсте или теле документа,
+  // а не на кнопках/ссылках (иначе Backspace «съедает» выбранный узел под модалкой)
+  const onCanvas = e.target === document.body || e.target.closest?.('#c4-svg');
+  if((e.key === 'Delete' || e.key === 'Backspace') && DSGN.sel && onCanvas){ e.preventDefault(); c4DeleteSel(); }
+  if(e.key === 'Escape'){ c4CancelLink(); c4Sel(null); c4Draw(); }
+});
+
+function c4Sel(id, type){
+  DSGN.sel = id; DSGN.selType = id ? type : null;
+  c4Draw(); c4Props();
+}
+
+function c4Add(type){
+  const m = c4M();
+  const n = {id: 'n' + Date.now(), type, name: C4_TYPE[type].ru, desc: '', tech: '',
+             x: c4Snap(40 + Math.random() * (960 - C4_W - 80)),
+             y: c4Snap(40 + Math.random() * (560 - C4_H - 80))};
+  m.nodes.push(n);
+  c4Sel(n.id, 'node'); c4Status(); c4SaveSoon();
+}
+
+const c4LinkOn = () => { const b = document.getElementById('c4-linkbtn'); return !!b && b.classList.contains('c4-vact'); };
+const c4CancelLink = () => { DSGN.linkFrom = null; const b = document.getElementById('c4-linkbtn'); if(b) b.classList.remove('c4-vact');
+  document.getElementById('c4-svg')?.classList.remove('c4-linking'); };
+
+function c4LinkMode(){
+  const btn = document.getElementById('c4-linkbtn');
+  const on = !btn.classList.contains('c4-vact');
+  btn.classList.toggle('c4-vact', on);
+  document.getElementById('c4-svg')?.classList.toggle('c4-linking', on);
+  DSGN.linkFrom = null;               // источник ещё не выбран — выбирается первым кликом по узлу
+  if(on) toast('Режим связи: кликните <b>источник</b>, затем <b>цель</b> (Esc — отмена)');
+  c4Status();
+}
+
+function c4DeleteSel(){
+  const m = c4M(); if(!DSGN.sel) return toast('Ничего не выбрано', true);
+  if(DSGN.selType === 'node'){
+    m.nodes = m.nodes.filter(n => n.id !== DSGN.sel);
+    m.edges = m.edges.filter(e => e.from !== DSGN.sel && e.to !== DSGN.sel);
+  } else {
+    m.edges = m.edges.filter(e => e.id !== DSGN.sel);
+  }
+  c4Sel(null); c4Status(); c4SaveSoon();
+}
+
+function c4Props(){
+  const el = document.getElementById('c4-props'); if(!el) return;
+  if(!DSGN.sel){ el.innerHTML = '<p class="small mut">Выберите элемент на холсте.<br>🔗 Связать: кликните источник → цель.</p>'; return; }
+  if(DSGN.selType === 'node'){
+    const n = c4Node(DSGN.sel); if(!n) return;
+    el.innerHTML = `
+      <label>Тип</label><select onchange="c4Set('type', this.value)">
+        ${C4_TYPES.map(x => `<option value="${x.t}" ${x.t===n.type?'selected':''}>${x.icon} ${x.ru}</option>`).join('')}</select>
+      <label>Название</label><input value="${esc(n.name)}" oninput="c4Set('name', this.value)">
+      <label>Технология</label><input value="${esc(n.tech)}" oninput="c4Set('tech', this.value)" placeholder="FastAPI, PostgreSQL…">
+      <label>Описание</label><textarea rows="2" oninput="c4Set('desc', this.value)">${esc(n.desc)}</textarea>`;
+  } else {
+    const e = c4Edge(DSGN.sel); if(!e) return;
+    const f = c4Node(e.from), t = c4Node(e.to);
+    el.innerHTML = `
+      <p class="small mut" style="margin:0 0 6px">${esc(f?.name||'?')} → ${esc(t?.name||'?')}</p>
+      <label>Что передаёт</label><input value="${esc(e.label)}" oninput="c4Set('label', this.value)" placeholder="запросы, платежи…">
+      <label>Технология</label><input value="${esc(e.tech)}" oninput="c4Set('tech', this.value)" placeholder="HTTPS, gRPC…">`;
+  }
+}
+
+function c4Set(k, v){
+  const o = DSGN.selType === 'node' ? c4Node(DSGN.sel) : c4Edge(DSGN.sel);
+  if(!o) return;
+  o[k] = v;
+  c4Draw(); c4Status(); c4SaveSoon();
+}
+
+function c4Status(note, warn){
+  const el = document.getElementById('c4-chips'); if(!el) return;
+  const m = c4M();
+  el.innerHTML = `<span class="c4-chip c4-chipv">${esc(C4_VIEWS[DSGN.view])}</span>`
+    + `<span class="c4-chip">узлов ${m.nodes.length}</span><span class="c4-chip">связей ${m.edges.length}</span>`
+    + (note ? `<span class="c4-chip ${warn?'c4-chipwarn':'c4-chipok'}">${esc(note)}</span>` : '')
+    + (DSGN.linkFrom ? '<span class="c4-chip c4-chipwarn">🔗 режим связи: выберите цель</span>'
+       : (c4LinkOn() ? '<span class="c4-chip c4-chipwarn">🔗 режим связи: кликните источник</span>' : ''));
+}
+
+/* зум холста: viewBox сжимается/расширяется вокруг центра; 0 — сброс на 100% */
+function c4Zoom(dir){
+  DSGN.zoom = dir === 0 ? 1 : Math.min(2.5, Math.max(0.5, Math.round(((DSGN.zoom || 1) + dir * 0.25) * 100) / 100));
+  c4ApplyZoom();
+}
+function c4ApplyZoom(){
+  const svg = document.getElementById('c4-svg'); if(!svg) return;
+  const z = DSGN.zoom || 1;
+  svg.setAttribute('viewBox', `${(960 - 960 / z) / 2} ${(560 - 560 / z) / 2} ${960 / z} ${560 / z}`);
+  const l = document.getElementById('c4-zlbl');
+  if(l) l.textContent = Math.round(z * 100) + '%';
+}
+
+function c4SaveSoon(){
+  if(DSGN.readonly) return;           // нет прав на сервис — не тягаем 403 при случайных правках
+  clearTimeout(DSGN.saveT);
+  // снимок фиксируется сейчас: таймер обязан сохранить тот {sid, view, данные}, при которых
+  // была правка, а не те, что станут актуальными через 1.2 с (иначе правка молча теряется)
+  DSGN.pending = {sid: DSGN.sid, view: DSGN.view,
+                  model: JSON.parse(JSON.stringify({nodes: c4M().nodes, edges: c4M().edges}))};
+  DSGN.saveT = setTimeout(() => { DSGN.saveT = null; c4Save(); }, 1200);
+}
+
+function c4FlushSave(){
+  if(!DSGN.saveT) return Promise.resolve();
+  clearTimeout(DSGN.saveT); DSGN.saveT = null;
+  const job = DSGN.pending; DSGN.pending = null;
+  return job ? c4Save(job) : Promise.resolve();   // немедленный досейв под старым видом (при смене вида/таба)
+}
+
+async function c4Save(job){
+  const use = job || DSGN.pending;
+  if(!job) DSGN.pending = null;
+  if(!use) return;
+  try{
+    const r = await api(`/services/${use.sid}/c4/${use.view}`,
+      {method:'PUT', body: JSON.stringify({model: use.model})});
+    if(r.vision_synced && SERVICE && SERVICE.id === use.sid){
+      const a = (SERVICE.artifacts||[]).find(x=>x.kind==='vision_c4');
+      if(a) a.diagram_code = r.vision_code;      // галерея и вкладка артефактов — без перезагрузки
+      const svg = document.getElementById('dvg-vision_c4');
+      if(svg) renderDiag(svg, r.vision_code);
+      c4Status('сохранено · Vision обновлён');
+    }else if((r.vision_skipped||[]).length){
+      c4Status('Vision не обновлён: ' + r.vision_skipped[0], true);
+    }else c4Status('сохранено');
+  }catch(e){ toast(esc(e.message), true); }
+}
+
+async function c4AI(view, btn){
+  if(c4M().nodes.length && !confirm('Заменить текущую модель ' + C4_VIEWS[view] + ' AI-структурой?')) return;
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ Проектирую…';
+  try{
+    const r = await api(`/services/${DSGN.sid}/c4/${view}/ai`,
+      {method:'POST', body: JSON.stringify({model: chatModelSel()})});
+    DSGN.models[view] = {nodes: r.model_json.nodes, edges: r.model_json.edges};
+    c4SetView(view);
+    c4SaveSoon();                       // AI-модель живёт только в редакторе — сразу в автосейв,
+                                        // иначе экспорт/предпросмотр прочитают из БД пустоту
+    toast(`${r.provider === 'ai-buddy' ? 'AI-структура (' + esc(r.model||'') + ')' : 'Стартовая структура'} для ${esc(C4_VIEWS[view])} загружена в редактор — <b>проверьте и поправьте</b>`);
+  }catch(e){ toast(esc(e.message), true); }
+  btn.disabled = false; btn.textContent = old;
+}
+
+async function c4Preview(btn){
+  try{
+    await c4FlushSave();                // недосейвенные правки уходят в БД до чтения
+    const r = await api(`/services/${DSGN.sid}/c4/export`,
+      {method:'POST', body: JSON.stringify({dry_run: true})});
+    const pre = document.getElementById('c4-preview');
+    if(!r.code){ pre.style.display = 'none'; return toast('Модели пусты — предпросмотра нет', true); }
+    pre.style.display = 'block';
+    pre.textContent = r.code;
+    toast('Предпросмотр Mermaid-исходника ниже — при сохранении модели он синхронизируется в артефакт Vision автоматически');
+  }catch(e){ toast(esc(e.message), true); }
+}
+
 /* ---------- MVP2: AI-ассистент по стандарту (BR-48…50) — чат в стиле ChatGPT ---------- */
 const PROVIDER_RU = {'ai-buddy': 'AI-Buddy (корпоративная LLM)', 'local-rag': 'локальная база знаний (LLM не подключена)', 'none': ''};
 let CHAT = [];            // [{role:'user'|'bot', text, provider, model, confidence, citations}]
@@ -901,7 +1514,8 @@ async function loadChats(){
   try{
     const r = await api('/assistant/chats');
     const el = $('#chat-list'); if(!el) return;
-    el.innerHTML = (r.chats || []).map(c => `
+    el.innerHTML = `<button class="chat-new-btn" onclick="chatNew()">＋ Новый чат</button>` +
+      (r.chats || []).map(c => `
       <div class="chat-item${c.id === CHAT_ID ? ' active' : ''}" onclick="chatOpen(${c.id})" title="${esc(c.title||'')}">
         <span class="chat-item-title">${esc(c.title || 'Чат')}</span>
         <span class="chat-item-del" onclick="event.stopPropagation(); chatDelete(${c.id})" title="Удалить чат">✕</span>
@@ -911,6 +1525,7 @@ async function loadChats(){
 
 async function chatOpen(id){
   if(CHAT_BUSY) return;
+  $('#chat-list')?.classList.remove('open');
   try{
     const r = await api('/assistant/history?chat_id=' + id);
     CHAT_ID = id;
@@ -929,58 +1544,110 @@ async function chatDelete(id){
   loadChats();
 }
 
-async function viewAssistant(){
-  let st = {provider:'local-rag', kb_pages:'…', kb_chunks:''};
-  try{ st = await api('/assistant/status'); }catch{}
-  const badge = st.provider === 'ai-buddy'
-    ? `<span class="badge b-approved">● AI-Buddy</span>`
-    : `<span class="badge b-in_review">● fallback: локальная база знаний</span>`;
-  const svcChip = ASK_SERVICE
-    ? `<span class="chip" id="svc-ctx-chip">🧩 ${esc(ASK_SVC_NAME || ('service #' + ASK_SERVICE))}
-       <span style="cursor:pointer" onclick="clearAskService()" title="Убрать контекст сервиса">✕</span></span>`
-    : '';
-  $('#view').innerHTML = `
-  <div class="chat-shell">
-    <aside class="chat-side">
-      <button class="chat-new-btn" onclick="chatNew()">＋ Новый чат</button>
-      <div class="chat-side-label">История</div>
-      <div class="chat-list" id="chat-list"></div>
-    </aside>
-    <div class="chat-wrap">
-      <div class="chat-head">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <b style="font-size:15px">AI-ассистент стандарта</b>${badge}${svcChip}
-          <span class="chip small">база знаний: ${st.kb_pages} стр · ${st.kb_chunks} чанков</span>
-        </div>
+/* плавающая иконка чат-бота у правого края (вне топбара и меню) */
+function aiTriggerMount(){
+  if(document.getElementById('ai-trigger')) return;
+  const b = document.createElement('button');
+  b.id = 'ai-trigger'; b.className = 'ai-trigger';
+  b.title = 'AI-ассистент стандарта — чат поверх любого экрана';
+  b.setAttribute('aria-label', 'AI-ассистент');
+  b.onclick = toggleAiPanel;
+  b.innerHTML = `<span class="robot" aria-hidden="true"><svg viewBox="0 0 24 24" width="26" height="26"
+    fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <line class="antenna" x1="12" y1="7" x2="12" y2="3.6"/>
+    <circle class="antenna-tip" cx="12" cy="2.9" r="1.1" fill="currentColor" stroke="none"/>
+    <rect x="4.2" y="7" width="15.6" height="12.4" rx="3.4"/>
+    <line x1="4.2" y1="12" x2="2.6" y2="12"/><line x1="19.8" y1="12" x2="21.4" y2="12"/>
+    <circle class="eye" cx="9.2" cy="12.6" r="1.5" fill="currentColor" stroke="none"/>
+    <circle class="eye" cx="14.8" cy="12.6" r="1.5" fill="currentColor" stroke="none"/>
+    <path d="M9.6 16.4h4.8"/>
+  </svg></span><i class="ai-dot"></i>`;
+  document.body.append(b);
+}
+/* чип контекста сервиса в шапке панели (🧩 + имя, ✕ — убрать) */
+async function aiCtxRender(){
+  const box = document.getElementById('ai-ctx'); if(!box) return;
+  if(!ASK_SERVICE){ box.innerHTML = ''; return; }
+  if(!ASK_SVC_NAME){
+    try{ const sv = await api('/services/' + ASK_SERVICE); ASK_SVC_NAME = sv.name; }
+    catch{ ASK_SVC_NAME = ''; }
+  }
+  box.innerHTML =
+    `<span class="chip" id="svc-ctx-chip">🧩 ${esc(ASK_SVC_NAME || ('service #' + ASK_SERVICE))}
+     <span style="cursor:pointer" onclick="clearAskService()" title="Убрать контекст сервиса">✕</span></span>`;
+}
+async function aiPanelOpen(){
+  let p = document.getElementById('aipanel');
+  if(p){ p.classList.add('open'); document.body.classList.add('ai-open'); aiCtxRender(); $('#q')?.focus(); return; }
+  p = document.createElement('div'); p.id = 'aipanel'; p.className = 'aipanel';
+  p.innerHTML = `
+  <div class="ai-head">
+    <b style="font-size:14px">AI-ассистент</b><span id="ai-status"></span>
+    <span class="grow"></span>
+    <button class="sec" onclick="aiHistToggle()" title="История чатов">История ▾</button>
+    <button class="sec" id="ai-full-btn" onclick="aiFullToggle(this)" title="На весь экран (меню остаётся видимым)">⛶</button>
+    <button class="sec" onclick="aiPanelClose()" title="Закрыть (Esc)">✕</button>
+    <div id="ai-ctx"></div>
+    <div class="chat-list" id="chat-list"></div>
+  </div>
+  <div class="chat-wrap">
+    <div class="chat-scroll" id="chat-scroll"><div class="chat-log" id="chat-log"></div></div>
+    <div class="composer">
+      <div class="composer-box">
+        <textarea id="q" rows="1" placeholder="Спросите про стандарт — артефакты, ревью, техдолг, fitness…"
+          onkeydown="chatKeydown(event)" oninput="chatAutogrow(this)"></textarea>
+        <select id="chat-model" class="chat-model" style="display:none"
+          onchange="chatModelPick()" title="Модель LLM"></select>
+        <button class="send-btn" id="send-btn" onclick="askAssistant()" title="Отправить (Enter)">↑</button>
       </div>
-      <div class="chat-scroll" id="chat-scroll"><div class="chat-log" id="chat-log"></div></div>
-      <div class="composer">
-        <div class="composer-box">
-          <textarea id="q" rows="1" placeholder="Спросите про стандарт — артефакты, ревью, техдолг, fitness…"
-            onkeydown="chatKeydown(event)" oninput="chatAutogrow(this)"></textarea>
-          <select id="chat-model" class="chat-model" style="display:none"
-            onchange="chatModelPick()" title="Модель LLM"></select>
-          <button class="send-btn" id="send-btn" onclick="askAssistant()" title="Отправить (Enter)">↑</button>
-        </div>
-        <p class="small mut" style="text-align:center;margin-top:8px">
-          Advisory-режим (BR-33): ассистент ничего не меняет, решение за человеком.
-          Ответы генерируются по страницам стандарта, но могут содержать неточности — проверяйте по первоисточнику.</p>
-      </div>
+      <p class="small mut" style="text-align:center">Advisory-режим (BR-33): ничего не меняет, решение за человеком.
+      Могут быть неточности — проверяйте по первоисточнику.</p>
     </div>
   </div>`;
-  const chats = await api('/assistant/chats').catch(() => ({chats: []}));
-  if((chats.chats || []).length) await chatOpen(chats.chats[0].id);   // последний чат
-  else renderChat();
-  $('#q').focus();
+  document.body.append(p);
+  document.body.classList.add('ai-open');
+  requestAnimationFrame(() => p.classList.add('open'));
+  aiCtxRender();
+  let st = {provider:'local-rag', kb_pages:'…', kb_chunks:''};
+  try{ st = await api('/assistant/status'); }catch{}
+  document.getElementById('ai-status').innerHTML = st.provider === 'ai-buddy'
+    ? `<span class="badge b-approved">● AI-Buddy</span>`
+    : `<span class="badge b-in_review">● fallback</span>`;
+  if(CHAT.length){ renderChat(); }                    // вернулись в открытый чат
+  else{
+    const chats = await api('/assistant/chats').catch(() => ({chats: []}));
+    if((chats.chats || []).length) await chatOpen(chats.chats[0].id);
+    else renderChat();
+  }
+  $('#q')?.focus();
   chatLoadModels();
   loadChats();
+}
+function aiPanelClose(){
+  const p = document.getElementById('aipanel');
+  if(!p) return;
+  p.classList.remove('open');
+  document.body.classList.remove('ai-open');
+}
+function toggleAiPanel(){
+  const p = document.getElementById('aipanel');
+  (p && p.classList.contains('open')) ? aiPanelClose() : aiPanelOpen();
+}
+function aiHistToggle(){ $('#chat-list')?.classList.toggle('open'); }
+/* разворот панели на весь экран под топбаром (меню остаётся доступным) */
+function aiFullToggle(btn){
+  const p = document.getElementById('aipanel'); if(!p) return;
+  const full = p.classList.toggle('full');
+  document.body.classList.toggle('ai-full', full);
+  btn.textContent = full ? '⇲' : '⛶';
+  btn.title = full ? 'Свернуть в боковую панель' : 'На весь экран (меню остаётся видимым)';
 }
 
 async function askAssistantAbout(sid){
   ASK_SERVICE = sid;
   try{ const sv = await api('/services/' + sid); ASK_SVC_NAME = sv.name; }
   catch{ ASK_SVC_NAME = ''; }
-  location.hash = '#/assistant';
+  await aiPanelOpen();   // панель поверх текущего экрана — контекст не теряется
 }
 function clearAskService(){
   ASK_SERVICE = null; ASK_SVC_NAME = '';
@@ -1025,7 +1692,8 @@ function renderChat(typing=false){
 
 function chatNew(){
   if(CHAT_BUSY) return;
-  CHAT_ID = null; CHAT = []; renderChat(); loadChats(); $('#q').focus();
+  $('#chat-list')?.classList.remove('open');
+  CHAT_ID = null; CHAT = []; renderChat(); loadChats(); $('#q')?.focus();
 }
 function chatKeydown(e){
   if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); askAssistant(); }
@@ -1230,19 +1898,21 @@ async function grpCreate(){
 
 /* ---------- admin / integrations ---------- */
 async function viewAdmin(){
-  const can = ['domain_expert','admin'].includes(S.user.role);
+  const can = ['domain_expert','admin'].includes(S.user.role);        // integration.import
+  const canAudit = ['domain_expert','admin','infosec'].includes(S.user.role);  // audit.view
+  const isAdmin = S.user.role === 'admin';
   $('#view').innerHTML = `<h1>Интеграции</h1>
   <div class="grid g2" style="margin-top:14px">
     <div class="card vio"><h2 style="margin-top:0">Backstage Catalog (BR-21)</h2>
       <p class="small mut">Импорт сервисов из catalog-info.yaml (GitLab autodiscovery). MVP — mock-коннектор с dry-run.</p>
-      <div class="btnrow"><button class="cya" onclick="importBackstage(true)" ${can?'':'disabled'}>Dry-run импорт</button>
-      <button onclick="importBackstage(false)" ${can?'':'disabled'}>Импортировать</button></div>
+      <div class="btnrow"><button class="cya" onclick="importBackstage(true)" ${can?'':'disabled title="Нужна роль domain_expert+"'}>Dry-run импорт</button>
+      <button onclick="importBackstage(false)" ${can?'':'disabled title="Нужна роль domain_expert+"'}>Импортировать</button></div>
       <div id="imp-res"></div></div>
     <div class="card"><h2 style="margin-top:0">CMDB (BR-20/22)</h2>
       <p class="small mut">DataGerry — REST API + ObjectTypes (контур кибербезопасности). Матрица владения полями:
       ИС → архитектурные атрибуты, CMDB → операционные (CI, health, алерты). Подключение — после финализации выбора CMDB.</p>
       <span class="badge b-draft">запланировано</span></div>
-    <div class="card"><h2 style="margin-top:0">AI-Buddy: корпоративная LLM</h2>
+    ${isAdmin?`<div class="card"><h2 style="margin-top:0">AI-Buddy: корпоративная LLM</h2>
       <p class="small mut">Подключение LLM для AI-ассистента (BR-48…50) и будущих AI-сценариев (BR-27…29).
       OpenAI-совместимый контракт: <code>{URL}/chat/completions</code>. Токен хранится в настройках
       платформы и никогда не возвращается в UI целиком. «Проверить связь» можно до сохранения —
@@ -1259,7 +1929,7 @@ async function viewAdmin(){
         <datalist id="llm-models"></datalist>
       </div>
       <div id="llm-res" style="margin-top:8px"></div>
-    </div>
+    </div>`:''}
     <div class="card"><h2 style="margin-top:0">Confluence: реестр техдолга (BR-54…56)</h2>
       <p class="small mut">Двусторонняя синхронизация со страницей «Реестр технического долга»
       (pageId=915912594): экспорт XHTML (storage format) и импорт markdown-таблицы.
@@ -1271,11 +1941,11 @@ async function viewAdmin(){
       <div class="btnrow"><button class="sec" onclick="cfImport()" ${['domain_expert','admin'].includes(S.user.role)?'':'disabled'}>Импортировать долги</button></div>
     </div>
     <div class="card"><h2 style="margin-top:0">Журнал аудита</h2>
-      <p class="small mut">Все действия фиксируются (BR-33). Просмотр: expert/admin.</p>
-      <div class="btnrow">${can?'<button class="sec" onclick="showAudit()">Открыть журнал</button>':'<span class="mut small">нужна роль domain_expert+</span>'}</div>
+      <p class="small mut">Все действия фиксируются (BR-33). Просмотр: expert/admin/InfoSec.</p>
+      <div class="btnrow">${canAudit?'<button class="sec" onclick="showAudit()">Открыть журнал</button>':`<span class="mut small">нужна роль domain_expert+ или InfoSec</span>`}</div>
       <div id="audit-res"></div></div>
   </div>`;
-  if (S.user.role === 'admin') renderLlm();
+  if (isAdmin) renderLlm();
 }
 async function renderLlm(){
   try{
@@ -1378,8 +2048,24 @@ function openModal(title, html){
   m.innerHTML = `<div class="card vio" style="width:min(560px,92vw);max-height:86vh;overflow:auto"><h2>${esc(title)}</h2>${html}</div>`;
   m.addEventListener('click', e=>{ if(e.target===m) m.remove(); });
   document.body.append(m);
+  const f = m.querySelector('input:not([disabled]),textarea,select');
+  if(f) f.focus();
 }
 const closeModal = () => $('#modal')?.remove();
+document.addEventListener('keydown', e => {
+  if(e.key !== 'Escape') return;
+  if($('#modal')) closeModal();
+  else aiPanelClose();
+});
+/* клик вне открытой панели закрывает её (клик по самой панели, кнопке-роботу и тостам — нет) */
+document.addEventListener('click', e => {
+  const p = document.getElementById('aipanel');
+  if(!p || !p.classList.contains('open')) return;
+  const t = e.target;
+  if(!t || typeof t.closest !== 'function') return;
+  if(t.closest('#aipanel') || t.closest('#ai-trigger') || t.closest('#toast')) return;
+  aiPanelClose();
+});
 window.addEventListener('hashchange', render);
 // восстановление сессии по сохранённому токену
 (async () => {

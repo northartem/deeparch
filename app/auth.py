@@ -1,7 +1,9 @@
 """Аутентификация (логин + пароль → сессионный токен) и иерархия ролей."""
 import hashlib
 import secrets
+
 from fastapi import Header, HTTPException
+
 from .db import q1
 
 ROLE_RANK = {"viewer": 0, "team_lead": 1, "infosec": 1, "domain_expert": 2, "admin": 3}

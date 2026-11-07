@@ -1,9 +1,10 @@
 """Демо-данные: пользователи, компоненты, сервисы (по мотивам реального ландшафта)."""
 import itertools
 import json
+
 from .auth import hash_password
-from .db import exec, q1, q, now
-from .standards import ARTIFACT_KINDS, PROJECT_TYPES, CHECKLIST_ITEMS, GRADES
+from .db import exec, now, q, q1
+from .standards import ARTIFACT_KINDS, CHECKLIST_ITEMS, GRADES
 
 USERS = [  # по одной учётке на каждую роль, пароль у всех 123456
     ("admin",  "Администратор платформы", "admin"),
@@ -157,7 +158,7 @@ def _seed_workflow():
     days_ago = itertools.count(start=len(DEMO_DEBTS) * 7, step=-7)   # 35, 28, 21, … дней назад
     for d in DEMO_DEBTS:
         ts = now() - next(days_ago) * 86400
-        did = exec(f"INSERT INTO tech_debts(debt_id,dtype,service_id,title,description,cause,"
+        exec(f"INSERT INTO tech_debts(debt_id,dtype,service_id,title,description,cause,"
                    f"arch_decision,target_state,consequences,business_impact,tech_impact,risk,"
                    f"probability,damage,maintenance_cost,repayment_cost,owner,priority,status,"
                    f"review_date,repayment_plan,dependencies,created_by,created_at,updated_at)"
@@ -677,7 +678,6 @@ DEMO_DIAGRAMS = {
 
 
 def demo_vision_template(service_name: str) -> str:
-    m = PROJECT_TYPES.get(service_name)
     return f"""## Architecture Vision — {service_name or "<сервис>"}
 
 ### 1. Контекстная диаграмма (C4 Level 1)

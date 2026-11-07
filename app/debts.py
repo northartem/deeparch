@@ -5,6 +5,7 @@
 ID присваивается один раз, неизменяем и не переиспользуется.
 """
 from datetime import datetime
+
 from .db import q
 
 

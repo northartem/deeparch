@@ -13,8 +13,10 @@
 """
 import json
 import os
+
 import httpx
-from .db import q, q1, exec, now
+
+from .db import exec, q1
 
 TIMEOUT = 30.0
 

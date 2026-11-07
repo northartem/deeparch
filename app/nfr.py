@@ -5,7 +5,8 @@
 ok (факт в пределах цели), breach (превышение), unknown (факт не измерен).
 """
 import re
-from .db import q, q1, exec, now
+
+from .db import exec, now, q, q1
 
 METRIC_NAMES = {"rps": "RPS (пиковый)", "p95_ms": "Время ответа p95, ms",
                 "sla_pct": "SLA, %", "rto_h": "RTO, ч", "rpo_min": "RPO, мин"}
@@ -26,7 +27,7 @@ def extract_targets(service_id: int):
              (service_id,))
     text = art["content_md"] if art else ""
     found = {}
-    for metric, (pat, default) in PATTERNS.items():
+    for metric, (pat, _default) in PATTERNS.items():  # default из PATTERNS не используется: метрика без совпадения просто отсутствует
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             raw = m.group(1).replace(" ", "").replace(",", ".")

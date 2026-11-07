@@ -9,7 +9,7 @@
 Роли: admin, domain_expert, team_lead, infosec, viewer.
 («Чемпион» — не роль, а состав: чемпионы входят в product-группы своих команд.)
 """
-from .db import q, q1
+from .db import q
 
 # Полномочия, проверяемые глобально (вне скоупа сервиса)
 GLOBAL_PERMS = {

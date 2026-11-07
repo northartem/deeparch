@@ -30,14 +30,15 @@ body{background:var(--bg);color:var(--txt);font-family:Inter,ui-sans-serif,-appl
 .topbar{display:flex;align-items:center;gap:20px;padding:0 24px;height:56px;
   position:sticky;top:0;background:rgba(255,255,255,.85);backdrop-filter:blur(12px) saturate(1.4);
   border-bottom:1px solid var(--line);z-index:5}
-.brand{font-weight:700;font-size:15px;letter-spacing:-.2px;display:flex;align-items:center;gap:8px}
-.brand .sub{color:var(--faint);font-weight:500;font-size:12px;padding-left:8px;border-left:1px solid var(--line)}
-nav{display:flex;gap:2px;flex:1}
-nav a{color:var(--mut);text-decoration:none;padding:6px 12px;border-radius:8px;font-weight:500;font-size:13.5px;transition:.12s}
+.brand{font-weight:700;font-size:15px;letter-spacing:-.2px;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.brand .sub{color:var(--faint);font-weight:500;font-size:12px;padding-left:8px;border-left:1px solid var(--line);white-space:nowrap}
+nav{display:flex;gap:2px;flex:1;min-width:0;overflow-x:auto;scrollbar-width:none}
+nav::-webkit-scrollbar{display:none}
+nav a{color:var(--mut);text-decoration:none;padding:6px 12px;border-radius:8px;font-weight:500;font-size:13.5px;transition:.12s;white-space:nowrap;flex:none}
 nav a:hover{color:var(--txt);background:var(--surface2)}
 nav a.act{color:var(--txt);background:var(--surface2);font-weight:600}
-#userbox{display:flex;align-items:center;gap:10px;color:var(--mut);font-size:13px}
-#userbox b{color:var(--txt);font-weight:600}
+#userbox{display:flex;align-items:center;gap:10px;color:var(--mut);font-size:13px;flex-shrink:0}
+#userbox b{color:var(--txt);font-weight:600;white-space:nowrap}
 
 /* ---------- layout ---------- */
 main{max-width:1120px;margin:0 auto;padding:32px 24px 90px}
@@ -108,6 +109,7 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .b-in_review{background:var(--accent-soft);color:var(--accent);border-color:#c7d2fe}
 .b-approved{background:var(--ok-soft);color:var(--ok);border-color:var(--ok-line)}
 .b-changes_requested{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
+.b-decommissioned{background:var(--surface2);color:var(--mut);border-color:var(--line)}
 .b-proposed{background:var(--surface2);color:var(--mut);border-color:var(--line)}
 .b-deprecated{background:var(--warn-soft);color:var(--warn);border-color:var(--warn-line)}
 .b-removed{background:var(--bad-soft);color:var(--bad);border-color:var(--bad-line)}
@@ -132,6 +134,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
 
 /* ---------- toast ---------- */
 #toast{position:fixed;bottom:20px;right:20px;display:flex;flex-direction:column;gap:8px;z-index:50}
+/* открытая AI-панель перекрывает правый нижний угол — тосты уезжают левее */
+body.ai-open #toast{right:calc(min(460px,100vw) + 16px)}
 .toast{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   padding:11px 15px;max-width:420px;box-shadow:var(--shadow-lg);font-size:13px;animation:pop .18s ease-out}
 .toast.err{border-color:var(--bad-line);background:var(--bad-soft)}
@@ -242,3 +246,147 @@ main:has(.chat-wrap){max-width:none}
 .sugg:hover{border-color:var(--accent);box-shadow:var(--shadow-md)}
 .sugg b{font-size:13.5px;font-weight:600}
 @media(max-width:700px){.sugg-grid{grid-template-columns:1fr}.chat-wrap{height:calc(100vh - 170px)}}
+
+/* ---------- Проектирование: C4-редактор ---------- */
+.c4-toolbar{margin-bottom:12px}
+.c4-toolbar-row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.c4-help{display:inline-flex;width:18px;height:18px;border-radius:50%;background:var(--surface2);
+  color:var(--mut);font-size:11px;font-weight:700;align-items:center;justify-content:center;
+  cursor:pointer;border:none;padding:0;flex:0 0 auto}
+.c4-help:hover{color:var(--accent);background:var(--accent-soft)}
+.c4-help-text{margin:10px 0 0;padding-top:10px;border-top:1px dashed var(--line)}
+.design-shell{display:grid;grid-template-columns:212px minmax(0,1fr) 244px;gap:14px;align-items:stretch}
+.c4-side,.c4-props-col{min-width:0;display:flex;flex-direction:column;gap:6px}
+.c4-cap{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--mut)}
+.c4-palette{display:flex;flex-direction:column;gap:4px}
+.c4-palette button{display:flex;align-items:center;gap:8px;text-align:left;width:100%;
+  background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:6px 10px;
+  font-size:12.5px;font-weight:600;cursor:pointer;color:var(--txt);transition:.12s}
+.c4-palette button:hover:not(:disabled){background:var(--surface2);border-color:#c7d2fe;transform:translateX(2px)}
+.c4-main{min-width:0;display:flex;flex-direction:column}
+.c4-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.c4-headbtns{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.c4-chips{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+.c4-chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;
+  background:var(--surface2);font-size:11.5px;font-weight:600;color:var(--mut);white-space:nowrap}
+.c4-chipv{background:var(--accent-soft);color:var(--accent)}
+.c4-chipok{background:#ecfdf5;color:#047857}
+.c4-chipwarn{background:#fff1f2;color:#e11d48}
+.c4-views{display:flex;background:var(--surface2);border:1px solid var(--line);border-radius:999px;padding:2px;gap:2px}
+.c4-views button{padding:5px 13px;border-radius:999px;border:none;background:transparent;
+  font-weight:600;font-size:12.5px;cursor:pointer;color:var(--mut);transition:.12s}
+.c4-views button:hover{color:var(--txt)}
+.c4-vact{background:var(--surface)!important;color:var(--accent)!important;box-shadow:var(--shadow-sm)}
+.c4-ibtn{padding:6px 10px}
+.c4-zoom{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--surface)}
+.c4-zoom button{border:none;background:transparent;padding:5px 9px;cursor:pointer;font:inherit;
+  font-size:12px;font-weight:600;color:var(--txt)}
+.c4-zoom button:hover{background:var(--surface2)}
+.c4-zlbl{min-width:46px;text-align:center;color:var(--mut)!important;cursor:pointer}
+.c4-canvas{position:relative;border:1px solid var(--line);border-radius:12px;background:#f8fafc;
+  overflow:hidden;height:clamp(440px, 62vh, 700px)}
+#c4-svg{width:100%;height:100%;display:block;touch-action:none;user-select:none}
+#c4-g g{cursor:grab}
+#c4-svg.c4-linking, #c4-svg.c4-linking #c4-g g{cursor:crosshair}
+.c4-src rect{animation:c4-pulse 1.1s ease-in-out infinite}
+@keyframes c4-pulse{50%{stroke-width:5}}
+#c4-g text{pointer-events:none}
+.c4-empty{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;
+  justify-content:center;gap:8px;text-align:center;background:rgba(248,250,252,.65);padding:20px}
+.c4-empty.show{display:flex}
+.c4-empty-ic{font-size:38px;opacity:.85}
+#c4-props input,#c4-props textarea,#c4-props select{width:100%;margin-bottom:6px}
+@media(max-width:1100px){
+  .design-shell{grid-template-columns:1fr}
+  .c4-palette{flex-direction:row;flex-wrap:wrap}
+  .c4-palette button{width:auto}
+  .c4-side p{display:none}
+  .c4-canvas{height:clamp(360px, 52vh, 560px)}
+}
+@media(prefers-reduced-motion:reduce){
+  .c4-src rect{animation:none}
+  .c4-palette button:hover{transform:none}
+}
+
+/* --- дашборд: кликабельные KPI-карточки и «тихие» ссылки-агрегаты --- */
+a.kpi-link{text-decoration:none;color:inherit;display:block}
+a.kpi-link:hover{border-color:var(--accent);transition:border-color .15s}
+a.no-ul{text-decoration:none}
+a.no-ul:hover span{text-decoration:underline}
+
+/* --- адаптивность топбара: меню сжимается в внутренний скролл вместо скролла всей страницы --- */
+@media (max-width: 1279px){ .brand .sub{display:none} }
+@media (max-width: 1059px){ .u-role{display:none} }
+@media (max-width: 859px){
+  .topbar{gap:10px;padding:0 14px}
+  nav a{padding:6px 9px;font-size:13px}
+}
+/* --- таблицы: не разрывать идентификаторы при переносе --- */
+td .badge:first-child{margin-right:6px}
+
+/* ---------- AI-ассистент: плавающая иконка чат-бота + правая панель ---------- */
+.ai-trigger{position:fixed;right:10px;top:50%;transform:translateY(-50%);z-index:34;
+  width:44px;height:44px;border-radius:50%;padding:0;
+  display:flex;align-items:center;justify-content:center;
+  border:1px solid var(--line);background:var(--surface);color:var(--accent);cursor:pointer;
+  box-shadow:var(--shadow-md);transition:opacity .15s,background .15s,border-color .15s}
+.ai-trigger:hover{border-color:var(--accent);background:var(--accent-soft)}
+.ai-trigger:active{transform:translateY(-50%) scale(.94)}
+/* робот живёт: покачивается, моргает глазами, шевлит антенной при наведении */
+.ai-trigger .robot{display:block;animation:ai-bob 3.8s ease-in-out infinite}
+.ai-trigger .eye{transform-box:fill-box;transform-origin:center;animation:ai-blink 6.5s infinite}
+@keyframes ai-bob{0%,100%{transform:translateY(1.2px)}50%{transform:translateY(-1.6px)}}
+/* два моргания за цикл с неровными паузами — выглядит «по-живому» */
+@keyframes ai-blink{
+  0%,10.5%,13.5%,57%,60.5%,100%{transform:scaleY(1)}
+  12%,59%{transform:scaleY(.08)}
+}
+.ai-trigger:hover .robot{animation:none;transform:translateY(-1px) scale(1.14)}
+.ai-trigger:hover .antenna,.ai-trigger:hover .antenna-tip{
+  transform-box:fill-box;transform-origin:bottom center;animation:ai-wiggle .45s ease-in-out infinite}
+@keyframes ai-wiggle{0%,100%{transform:rotate(0)}30%{transform:rotate(14deg)}70%{transform:rotate(-14deg)}}
+@media (prefers-reduced-motion:reduce){
+  .ai-trigger .robot,.ai-trigger .eye,.ai-trigger .antenna,.ai-trigger .antenna-tip{animation:none}
+}
+.ai-dot{position:absolute;top:2px;right:2px;width:10px;height:10px;border-radius:50%;
+  background:var(--ok);border:2px solid var(--surface);pointer-events:none}
+/* панель открыта — кнопка-закладка становится не нужна и уходит */
+body.ai-open .ai-trigger{opacity:0;pointer-events:none}
+.aipanel{position:fixed;top:0;right:0;bottom:0;width:min(460px,100vw);z-index:35;
+  background:var(--surface);border-left:1px solid var(--line);box-shadow:var(--shadow-lg);
+  display:flex;flex-direction:column;transform:translateX(103%);transition:transform .2s ease}
+.aipanel.open{transform:none}
+.ai-head{display:flex;align-items:center;gap:8px;padding:12px 14px;flex-wrap:wrap;
+  border-bottom:1px solid var(--line);flex-shrink:0;position:relative}
+.ai-head .grow{flex:1}
+.aipanel .chat-wrap{max-width:none;flex:1;min-height:0;padding:0 14px 10px}
+.aipanel .chat-scroll{padding:14px 2px 6px}
+.aipanel .chat-empty{padding-top:8vh}
+.aipanel .sugg-grid{grid-template-columns:1fr}
+.aipanel .chat-list{display:none;position:absolute;left:10px;right:10px;top:calc(100% + 6px);max-height:46vh;
+  overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:10px;
+  padding:6px;box-shadow:var(--shadow-md);z-index:3;flex-direction:column;gap:3px}
+.aipanel .chat-list.open{display:flex}
+.aipanel .composer p.small{margin-top:4px}
+@media(max-width:600px){.aipanel{width:100vw;border-left:0}}
+/* разворот на весь экран: под топбаром (56px), меню остаётся видимым и кликабельным */
+.aipanel.full{top:56px;width:100vw;border-left:none;box-shadow:none;border-top:1px solid var(--line)}
+.aipanel.full .chat-wrap{max-width:980px;width:100%;align-self:center}
+.aipanel.full .sugg-grid{grid-template-columns:1fr 1fr}
+.aipanel.full .chat-scroll{padding:18px 8px 8px}
+/* при развороте сдвиг тостов не нужен — панель на всю ширину, тосты поверх неё */
+body.ai-full #toast{right:20px}
+
+/* ---------- Артефакты: сворачиваемые карточки + чипы-индекс (2026-11-07) ---------- */
+details.art-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  padding:12px 16px;margin-bottom:10px;box-shadow:var(--shadow-sm)}
+details.art-card>summary{cursor:pointer;list-style:none;display:flex;align-items:center;
+  gap:8px;flex-wrap:wrap;padding:2px 0;user-select:none}
+details.art-card>summary::-webkit-details-marker{display:none}
+details.art-card>summary::before{content:'▸';color:var(--mut);flex:none;transition:transform .12s}
+details.art-card[open]>summary::before{content:'▾'}
+details.art-card>summary .chip{margin:0}
+button.art-idx{cursor:pointer;font-family:inherit;color:var(--txt);font-weight:500;background:var(--surface)}
+button.art-idx:hover{background:var(--surface2)}
+/* readonly-поля (Vision-исходник) визуально отличаются от редактируемых (ревью 2026-11-07) */
+textarea[readonly]{background:var(--surface2)}

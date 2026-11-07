@@ -1,8 +1,8 @@
 """SQLite-слой: инициализация схемы и простые хелперы."""
+import os
 import sqlite3
 import threading
 import time
-import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "deeparch.db")
 _local = threading.local()
@@ -190,6 +190,16 @@ CREATE TABLE IF NOT EXISTS fitness_runs (    -- MVP2 BR-42: прогоны ав�
   results TEXT NOT NULL,                 -- JSON: [{rule_id,name,verdict,detail}]
   passed INTEGER, failed INTEGER, warned INTEGER,
   created_by TEXT, created_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS c4_models (       -- Проектирование: визуальные C4-модели сервиса
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  service_id INTEGER NOT NULL REFERENCES services(id),
+  view TEXT NOT NULL,                        -- context (L1) | container (L2)
+  model_json TEXT NOT NULL DEFAULT '{}',     -- {"nodes":[...], "edges":[...]}
+  updated_by TEXT,
+  updated_at REAL,
+  UNIQUE(service_id, view)
 );
 
 CREATE TABLE IF NOT EXISTS requirements (    -- ФТ/НФТ, приходящие архитектору на сервис
