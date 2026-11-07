@@ -7,8 +7,9 @@
 """
 import json
 import re
-from .db import q, q1, exec, now
+
 from . import llm
+from .db import exec, now, q, q1
 
 TYPES = {"func": "ФТ", "nonfunc": "НФТ"}
 _STATUSES = ("new", "in_work", "covered")

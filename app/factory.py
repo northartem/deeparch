@@ -6,8 +6,9 @@
 проектного типа: что обязательно заполнить перед ревью.
 """
 import json
-from .db import exec, q, q1, now
-from .standards import ARTIFACT_KINDS, PROJECT_TYPES, CHECKLIST_ITEMS
+
+from .db import exec, now, q, q1
+from .standards import ARTIFACT_KINDS, PROJECT_TYPES
 
 
 def _vision(code, name, domain, project_type):

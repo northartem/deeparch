@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Синхронизация зависимостей (включая dev)
+        run: uv sync --dev
+
+      - name: Ruff (lint)
+        run: uv run ruff check app tests
+
+      - name: Pytest (изолированная temp-БД)
+        run: uv run pytest tests/ -q
+
+      - name: Синтаксис фронтенда
+        run: node --check web/app.js
+
+      - name: Компиляция Python
+        run: uv run python -m compileall -q app tests

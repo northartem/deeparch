@@ -11,8 +11,8 @@ STANDARD_NAME = "Общий архитектурный стандарт (Archite
 STANDARD_REF = "https://confluence.dats.tech/pages/viewpage.action?pageId=894079737"
 
 # --- 9 артефактов стандарта ----------------------------------------------------
-# (7 базовых + threat_model и drp_bcp: обязательны для critical/b2c_highload
-#  по «Минимальным наборам по типам проектов»; навигатор по артефактам — pageId=924778815)
+# (7 базовых + threat_model и drp_bcp: обязательны для critical/b2c_highload по
+#  «Минимальному набору документов по типам проектов» — pageId=896409016)
 
 ARTIFACT_KINDS = [
     {
@@ -77,7 +77,7 @@ ARTIFACT_KINDS = [
         "question": "Какие угрозы актуальны и чем они закрыты?",
         "captures": "Границы доверия, активы, сценарии угроз (STRIDE), контрмеры и их статус.",
         "required_artifacts": ["threat-model: диаграмма границ доверия + таблица угроз с митигациями"],
-        "template_ref": "https://confluence.dats.tech/pages/viewpage.action?pageId=924778815",
+        "template_ref": "https://confluence.dats.tech/pages/viewpage.action?pageId=896409016",
     },
     {
         "kind": "drp_bcp",
@@ -85,7 +85,7 @@ ARTIFACT_KINDS = [
         "question": "Как система восстанавливается после отказа?",
         "captures": "RTO/RPO, сценарии отказа и реакции, бэкапы и проверка восстановления, резервный контур.",
         "required_artifacts": ["drp/bcp-документ: RTO/RPO, сценарии отказа, план восстановления"],
-        "template_ref": "https://confluence.dats.tech/pages/viewpage.action?pageId=924778815",
+        "template_ref": "https://confluence.dats.tech/pages/viewpage.action?pageId=896409016",
     },
 ]
 

@@ -1,20 +1,34 @@
 """REST API MVP DeepArch (BR-01…13 ядро + BR-14…27 фундамент + RBAC)."""
 import json
 import secrets
-from fastapi import APIRouter, HTTPException, Depends, Body, Header, Response
+
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Response
 from fastapi.responses import StreamingResponse
-from .db import q, q1, exec, now
-from .auth import current_user, verify_password
-from .roles import (GLOBAL_PERMS, has_global, user_groups, group_services,
-                    service_scope, can_edit_service, in_committee)
-from .standards import (STANDARD_NAME, STANDARD_REF, ARTIFACT_KINDS, CHECKLIST_ITEMS,
-                        GRADES, PROJECT_TYPES, REVIEW_STATUSES, LIFECYCLE, ROLES,
-                        COMPONENT_KINDS, COMPONENT_STATUSES,
-                        DEBT_TYPES, DEBT_STATUSES, DEBT_RISKS, DEBT_PRIORITIES)
-from .debts import gen_debt_id
-from . import ai, integrations, fitness, factory, nfr, kb, llm, reqs
+
+from . import ai, factory, fitness, integrations, kb, llm, nfr, reqs
 from . import c4 as c4mod
-from .seed import seed, demo_vision_template
+from .auth import current_user, verify_password
+from .db import exec, now, q, q1
+from .debts import gen_debt_id
+from .roles import can_edit_service, has_global, in_committee, service_scope, user_groups
+from .seed import seed
+from .standards import (
+    ARTIFACT_KINDS,
+    CHECKLIST_ITEMS,
+    COMPONENT_KINDS,
+    COMPONENT_STATUSES,
+    DEBT_PRIORITIES,
+    DEBT_RISKS,
+    DEBT_STATUSES,
+    DEBT_TYPES,
+    GRADES,
+    LIFECYCLE,
+    PROJECT_TYPES,
+    REVIEW_STATUSES,
+    ROLES,
+    STANDARD_NAME,
+    STANDARD_REF,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -466,7 +480,7 @@ def c4_put(sid: int, view: str, body=Body(...), user=Depends(current_user)):
     try:
         norm = c4mod.save(sid, view, body.get("model") or {}, user["username"])
     except ValueError as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     audit(user, "c4_save", f"service:{sid}/{view}",
           f"nodes:{len(norm['nodes'])} edges:{len(norm['edges'])}")
     return {"ok": True, "model": norm}
@@ -632,10 +646,12 @@ def dashboard(user=Depends(current_user)):
         "CASE d.risk WHEN 'Critical' THEN 0 WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END LIMIT 5")
 
     # --- R5: покрытие процессом ---
+    # «без self-check» = нет ни одного отвеченного прогона (create_service вставляет пустой run)
     coverage = {
         "no_requirements": q("SELECT code FROM services WHERE id NOT IN (SELECT DISTINCT service_id FROM requirements)"),
         "no_c4": q("SELECT code FROM services WHERE id NOT IN (SELECT DISTINCT service_id FROM c4_models)"),
-        "no_checklist": q("SELECT code FROM services WHERE id NOT IN (SELECT DISTINCT service_id FROM checklist_runs)"),
+        "no_checklist": q("SELECT code FROM services WHERE id NOT IN "
+                          "(SELECT DISTINCT service_id FROM checklist_runs WHERE answers != '[]')"),
     }
 
     # --- R6: активность — только тем, у кого есть право на журнал аудита ---
@@ -669,8 +685,8 @@ def reseed(user=Depends(current_user)):
 @router.get("/debts")
 def list_debts(dtype: str = None, service_id: int = None, status: str = None,
                priority: str = None, user=Depends(current_user)):
-    sql, args = "SELECT d.*, s.code AS service_code, s.name AS service_name FROM tech_debts d" \
-                " LEFT JOIN services s ON s.id = d.service_id WHERE 1=1", []
+    sql, args = ("SELECT d.*, s.code AS service_code, s.name AS service_name FROM tech_debts d"
+                 " LEFT JOIN services s ON s.id = d.service_id WHERE 1=1"), []
     if dtype:
         sql += " AND d.dtype=?"; args.append(dtype)
     if service_id:
@@ -909,7 +925,7 @@ def factory_scaffold(body=Body(...), user=Depends(current_user)):
                              body.get("architect"), user["username"],
                              body.get("lifecycle") or "design")
     except ValueError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
     audit(user, "factory_scaffold", f"service:{code}",
           f"artifacts:{r['artifacts']} components:{len(r['components_attached'])}")
     return r

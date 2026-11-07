@@ -5,8 +5,7 @@
 В проде — модуль @backstage/plugin-catalog-backend-module-gitlab читает
 catalog-info.yaml из GitLab; DataGerry — через REST API (pageId=915904198).
 """
-from .db import exec, q1, q, now
-from .seed import demo_vision_template
+from .db import exec, now, q, q1
 
 MOCK_CATALOG = [
     {
@@ -65,7 +64,6 @@ def sync_to_catalog(service_id: int):
             },
         },
     }
-    import json
     return {"service_id": service_id, "catalog_entity": payload, "generated": "catalog-info.yaml (mock)"}
 
 
@@ -123,7 +121,7 @@ def parse_debts_markdown(text: str):
             if any("ID" in c for c in cells):
                 header = cells
             continue
-        row = dict(zip(header, cells))
+        row = dict(zip(header, cells, strict=False))
         did = (row.get("ID") or row.get("id") or "").strip()
         if not did:
             continue
@@ -143,7 +141,7 @@ def parse_debts_markdown(text: str):
         status = ru_status.get(status_raw) or \
                  next((s for s in DEBT_STATUSES if s.startswith(status_raw[:5])
                        and status_raw), "new")
-        def _num(key, default=3):
+        def _num(key, default=3, row=row):   # row фиксируется: замыкание не должно видеть следующую итерацию
             try:
                 return max(1, min(5, int(row.get(key, "") or default)))
             except ValueError:

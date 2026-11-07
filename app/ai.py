@@ -6,11 +6,10 @@ MVP: provider="mock" — детерминированные эвристики �
 (см. Confluence: "SDLC Агент соответствия архитектурным стандартам" pageId=915912563).
 Все результаты advisory-only, с evidence-ссылками (BR-32), решение за человеком (BR-33).
 """
-import json
-from .db import q, q1
 from . import llm
+from .db import q, q1
 from .kb import retrieve
-from .standards import CHECKLIST_ITEMS, GRADES, ARTIFACT_KINDS, STANDARD_REF
+from .standards import ARTIFACT_KINDS, CHECKLIST_ITEMS
 
 MIN_CONTENT = 200  # эвристика: артефакт содержательнее 200 символов
 
@@ -64,9 +63,9 @@ def _service_facts(service_id: int, max_art: int = 400) -> str:
               "WHERE sc.service_id=? LIMIT 20", (service_id,))
     arts = q("SELECT kind, content_md, diagram_code, source_url FROM artifacts "
              "WHERE service_id=? ORDER BY kind", (service_id,))
-    lines = [f"Сервис: {svc['name']} ({svc['code']}), домен: {svc['domain'] or '—'}, "
-             f"тип проекта: {svc['project_type']}, жизненный цикл: {svc['lifecycle']}, "
-             f"владелец: {svc['owner'] or '—'}, архитектор: {svc['architect'] or '—'}."]
+    lines = [(f"Сервис: {svc['name']} ({svc['code']}), домен: {svc['domain'] or '—'}, "
+              f"тип проекта: {svc['project_type']}, жизненный цикл: {svc['lifecycle']}, "
+              f"владелец: {svc['owner'] or '—'}, архитектор: {svc['architect'] or '—'}.")]
     # входящие требования — исходник, из которого проектируется архитектура
     reqs = q("SELECT req_type, ext_id, text FROM requirements WHERE service_id=? "
              "ORDER BY req_type, id LIMIT 20", (service_id,))

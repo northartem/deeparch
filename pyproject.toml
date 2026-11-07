@@ -15,3 +15,21 @@ dependencies = [
 
 [tool.uv]
 package = false
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["I", "B", "RUF"]
+ignore = ["RUF013",   # implicit Optional: идиома FastAPI для Header(default=None)
+          "RUF001", "RUF002", "RUF003"]  # «ambiguous unicode»: проект с русскими текстами
+
+[tool.ruff.lint.flake8-bugbear]
+# Depends/Body/Header в значениях по умолчанию — документированный паттерн FastAPI
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Body", "fastapi.Header", "fastapi.Query"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff>=0.17.4",
+]

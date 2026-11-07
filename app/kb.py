@@ -7,8 +7,8 @@
 ассистент только отвечает, ничего не меняет (BR-33).
 """
 import math
-import os
 import re
+
 from . import llm
 from .db import q, q1
 from .kb_data import PAGES
@@ -135,10 +135,10 @@ def _service_context(service_id: int) -> str | None:
               "WHERE sc.service_id=? LIMIT 15", (service_id,))
     arts = q("SELECT kind, content_md, diagram_code, source_url FROM artifacts "
              "WHERE service_id=? ORDER BY kind", (service_id,))
-    lines = [f"Сервис в системе DeepArch: {svc['name']} ({svc['code']}), "
-             f"домен: {svc['domain'] or '—'}, тип проекта: {svc['project_type']}, "
-             f"жизненный цикл: {svc['lifecycle']}, владелец: {svc['owner'] or '—'}, "
-             f"архитектор: {svc['architect'] or '—'}."]
+    lines = [(f"Сервис в системе DeepArch: {svc['name']} ({svc['code']}), "
+              f"домен: {svc['domain'] or '—'}, тип проекта: {svc['project_type']}, "
+              f"жизненный цикл: {svc['lifecycle']}, владелец: {svc['owner'] or '—'}, "
+              f"архитектор: {svc['architect'] or '—'}.")]
     reqs = q("SELECT req_type, ext_id, text FROM requirements WHERE service_id=? "
              "ORDER BY req_type, id LIMIT 15", (service_id,))
     if reqs:
@@ -239,7 +239,7 @@ def answer_stream(question: str, k: int = 4, history: list | None = None, model:
     citations, ctx, q, hits = prep
     svc_ctx = _service_context(service_id) if service_id else None
     if llm.configured():
-        url_, _tok, def_model = llm.config()
+        _url, _tok, def_model = llm.config()
         eff_model = (model or "").strip() or def_model
         yield {"type": "meta", "provider": "ai-buddy", "model": eff_model,
                "confidence": 0.9, "citations": citations}

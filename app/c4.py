@@ -8,8 +8,9 @@
 import json
 import math
 import re
-from .db import q, q1, exec, now
-from . import llm, ai
+
+from . import ai, llm
+from .db import exec, now, q, q1
 
 VIEWS = {"context": "Контекст (L1)", "container": "Контейнеры (L2)"}
 _NODE_TYPES = {"person", "system", "external", "container", "db"}

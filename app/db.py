@@ -1,8 +1,8 @@
 """SQLite-слой: инициализация схемы и простые хелперы."""
+import os
 import sqlite3
 import threading
 import time
-import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "deeparch.db")
 _local = threading.local()

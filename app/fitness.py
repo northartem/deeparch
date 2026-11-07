@@ -6,7 +6,8 @@
 """
 import json
 import re
-from .db import q, q1, exec, now
+
+from .db import exec, now, q
 
 
 def _eval_rule(rule, art_by_kind):
