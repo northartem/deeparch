@@ -84,7 +84,7 @@ async function logout(){
 route(/^#\/$/, viewDash);
 route(/^#\/admin$/, viewAdmin);
 route(/^#\/services$/, viewServices);
-route(/^#\/service\/(\d+)(?:\/(\w+))?$/, (id, tab) => viewService(+id, tab));
+route(/^#\/service\/(\d+)(?:\/(\w+))?(?:#([\w-]+))?$/, (id, tab, frag) => viewService(+id, tab, frag));
 route(/^#\/components$/, viewComponents);
 route(/^#\/debts$/, viewDebts);
 // ассистент больше не страница, а панель поверх любого экрана;
@@ -274,7 +274,7 @@ const ARTIFACT_TAB = () => ['artifacts','Артефакты' + (S.standard ? ` (
 const TABS = [['card','Карточка'],ARTIFACT_TAB(),['review','Ревью'],['components','Компоненты']]; // базовый список (полный собирается в viewService)
 let SERVICE = null;
 let _VS_GEN = 0;                    // защита от гонки: у каждого вызова viewService свой номер
-async function viewService(id, tab='card'){
+async function viewService(id, tab='card', frag=''){
   if(tab === 'check'){                          // self-check интегрирован в «Ревью» — старые ссылки работают
     location.hash = `#/service/${id}/review`; return;
   }
@@ -289,6 +289,7 @@ async function viewService(id, tab='card'){
   const tabs = [['card','Карточка'],
     ['reqs', 'Требования' + (s.requirements?.length ? ` (${s.requirements.length})` : '')],
     ['design', 'Проектирование'],
+    ['packet', '📖 Пакет'],
     ARTIFACT_TAB(),['review','Ревью'],['components','Компоненты'],
     ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')],
     ['fitness', 'Fitness'], ['nfr', 'NFR']];
@@ -304,8 +305,8 @@ async function viewService(id, tab='card'){
   </div>
   <div class="tabs">${tabs.map(([k,t])=>`<a class="${k===active?'act':''}" href="#/service/${id}/${k}">${t}</a>`).join('')}</div>
   <div id="tabbody"></div>`;
-  ({card:tabCard, reqs:tabReqs, design:tabDesign, artifacts:tabArtifacts, review:tabReview,
-    components:tabComponents, debt:tabDebt, fitness:tabFitness, nfr:tabNfr}[active])(s);
+  ({card:tabCard, reqs:tabReqs, design:tabDesign, packet:tabPacket, artifacts:tabArtifacts, review:tabReview,
+    components:tabComponents, debt:tabDebt, fitness:tabFitness, nfr:tabNfr}[active])(s, frag);
 }
 
 /* ---------- диаграммы (Mermaid) ---------- */
@@ -426,6 +427,95 @@ async function exportCatalog(id){
 const DIAG_KINDS = ['vision_c4', 'deployment', 'data_model'];
 let ART_JUMP = null;              // переход из галереи «Проектирования»: открыть и проскроллить
 const _artFilled = k => !!(k && (((k.content_md||'').trim()) || ((k.diagram_code||'').trim())));
+
+/* ---------- Пакет: человекочитаемая вьюха архитектуры (read-only) ---------- */
+function mdDoc(src){
+  /* Рендер markdown пакета для чтения: escape-first, затем структурные блоки —
+     код-фенсы, заголовки, GFM-таблицы, списки, абзацы, ссылки (только http/https/#).
+     Без внешних зависимостей (расширение идеологии mdLite из чата). */
+  const lines = esc(src || '').split('\n');
+  const inline = t => t
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+|#[^)\s]*)\)/g,
+             '<a class="lnk" href="$2" target="_blank" rel="noopener">$1</a>');
+  const out = [];
+  let i = 0;
+  while(i < lines.length){
+    const ln = lines[i];
+    if(/^\s*```/.test(ln)){                      // код-фенс: до закрывающего
+      const buf = []; i++;
+      while(i < lines.length && !/^\s*```/.test(lines[i])){ buf.push(lines[i]); i++; }
+      i++;                                       // закрывающий фенс (или конец)
+      out.push(`<pre class="chatcode"><code>${buf.join('\n')}</code></pre>`);
+      continue;
+    }
+    const h = ln.match(/^(#{1,6})\s+(.*)$/);
+    if(h){ const lvl = Math.min(h[1].length + 1, 5);
+      out.push(`<h${lvl} class="pk-h">${inline(h[2])}</h${lvl}>`); i++; continue; }
+    if(/^\s*\|.*\|\s*$/.test(ln) && i + 1 < lines.length
+       && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i + 1])){     // GFM-таблица
+      const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => inline(c.trim()));
+      const head = cells(ln); i += 2;
+      const rows = [];
+      while(i < lines.length && /^\s*\|.*\|\s*$/.test(lines[i])){ rows.push(cells(lines[i])); i++; }
+      out.push(`<div style="overflow:auto"><table class="pk-table"><thead><tr>${head.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`);
+      continue;
+    }
+    if(/^\s*([-*·]|\d+[.)])\s+/.test(ln)){       // список: подряд идущие пункты
+      const items = [];
+      while(i < lines.length && /^\s*([-*·]|\d+[.)])\s+/.test(lines[i])){
+        items.push(lines[i].replace(/^\s*([-*·]|\d+[.)])\s+/, '')); i++;
+      }
+      out.push(`<ul class="pk-ul">${items.map(t=>`<li>${inline(t)}</li>`).join('')}</ul>`);
+      continue;
+    }
+    if(!ln.trim()){ i++; continue; }
+    const buf = [ln]; i++;                       // абзац до пустой строки/блока
+    while(i < lines.length && lines[i].trim()
+          && !/^\s*([-*·]|\d+[.)])\s+/.test(lines[i]) && !/^\s*\|.*\|\s*$/.test(lines[i])
+          && !/^#{1,6}\s+/.test(lines[i]) && !/^\s*```/.test(lines[i])){
+      buf.push(lines[i]); i++;
+    }
+    out.push(`<p class="pk-p">${inline(buf.join('<br>'))}</p>`);
+  }
+  return out.join('');
+}
+function tabPacket(s, frag){
+  const byKind = Object.fromEntries(s.artifacts.map(a => [a.kind, a]));
+  const secs = S.standard.artifacts.map(a => {
+    const cur = byKind[a.kind] || {};
+    const body = (cur.content_md || '').trim();
+    const diag = (cur.diagram_code || '').trim();
+    const filled = _artFilled(cur);
+    const noSrc = filled && !(cur.source_url || '').trim();
+    const chip = filled
+      ? `<span class="chip" style="background:#ecfdf5;color:#047857">✓ заполнен${noSrc?' · нет исходника':''}</span>`
+      : `<span class="chip" style="background:var(--surface2);color:#52525b">✗ пуст</span>`;
+    return {kind: a.kind, title: a.title, chip, filled, body, diag,
+            html: `<section class="pk-sec" id="pk-${a.kind}">
+      <h2>${esc(a.title)} ${chip}</h2>
+      ${body ? mdDoc(body) : '<p class="small mut">Артефакт не заполнен — раздел появится после заполнения во вкладке «Артефакты».</p>'}
+      ${diag ? `<div class="pk-diag" id="pkd-${a.kind}"></div>` : ''}
+    </section>`};
+  });
+  const meta = `<p class="small mut" style="margin:0 0 4px">${esc(s.name)} (${esc(s.code)}) · домен: ${esc(s.domain||'—')} ·
+    тип: ${esc(S.standard.project_types[s.project_type]?.title||s.project_type)} ·
+    владелец: ${esc(s.owner||'—')} · архитектор: ${esc(s.architect||'—')}</p>`;
+  $('#tabbody').innerHTML = `
+    ${meta}
+    <div class="pk-head">
+      <span class="small mut">Пакет в порядке Architecture Definition Set — читается как документ.
+      Advisory: представление read-only, редактирование — во вкладке «Артефакты».</span>
+      <a class="sec pk-edit" href="#/service/${s.id}/artifacts">✏️ Редактировать</a>
+    </div>
+    <nav class="pk-toc">${secs.map(x =>
+      `<a class="${x.filled?'':'pk-toc-empty'}" onclick="document.getElementById('pk-${x.kind}').scrollIntoView({block:'start'})">${x.filled?'✓':'✗'} ${esc(x.title)}</a>`).join('')}</nav>
+    <div class="card" style="margin-top:10px">${secs.map(x => x.html).join('<hr class="pk-sep">')}</div>`;
+  // диаграммы — рендерим после вставки в DOM (mermaid.render требует живого элемента)
+  secs.filter(x => x.diag).forEach(x => renderDiag(document.getElementById('pkd-' + x.kind), x.diag));
+  if(frag){ const t = document.getElementById('pk-' + frag); if(t) t.scrollIntoView({block:'start'}); }
+}
 
 function tabArtifacts(s){
   const ed = canEditSvc(s);
@@ -569,6 +659,8 @@ function tabReview(s){
     содержательные риски и несоответствия. Advisory (BR-33): находки не блокируют отправку —
     решение за автором и ревьюером.</p>
     <div class="btnrow">
+      <a class="sec" style="align-self:center" href="#/service/${s.id}/packet"
+         title="Человекочитаемая вьюха всего пакета: диаграммы, таблицы, оглавление">📖 Открыть пакет</a>
       ${s.review_status==='in_review'
         ? `<span class="chip">Ревью идёт · запрошено <b>${esc(open?.requested_by||'')}</b></span>`
         : `<button id="btn-send-review" onclick="requestReview(${s.id})" ${canSend?'':'disabled'}>Отправить на ревью</button>

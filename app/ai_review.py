@@ -335,8 +335,9 @@ def llm_findings(service_id: int, model: str = "") -> dict:
         if obj is None:
             raise llm.LLMError("в ответе нет корректного JSON с находками")
         findings = _normalize_llm_findings(obj)
-        for f in findings:  # цель находки: артефакт → «Артефакты», остальное → карточка
-            f["target"] = _tgt(service_id, "artifacts") if f["artifact_kind"] else _tgt(service_id, "card")
+        for f in findings:  # цель находки: раздел пакета (читаемая вьюха) или карточка
+            f["target"] = (f"#/service/{service_id}/packet#{f['artifact_kind']}"
+                           if f["artifact_kind"] else _tgt(service_id, "card"))
         return {"provider": "ai-buddy",
                 "model": (model or "").strip() or llm.config()[2],
                 "findings": findings, "note": None}
