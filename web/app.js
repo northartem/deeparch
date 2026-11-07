@@ -453,6 +453,8 @@ function tabArtifacts(s){
     const dis = ed ? '' : 'disabled';
     const f = _artFilled(cur);
     const diagKind = DIAG_KINDS.includes(a.kind);
+    // подсказка (решение 2026-11-07): у обязательных пустых диаграмм AI-черновик — старт, а не опция
+    const diagBoost = mandatory && !f && diagKind && a.kind !== 'vision_c4';
     const open = !f && mandatory;   // пустой обязательный раскрыт; опциональный пустой — свёрнут,
                                     // чтобы пустой draft не превращался обратно в простыню (ревью 2026-11-07)
     return `<details class="art-card" id="art-${a.kind}" ${open?'open':''}>
@@ -470,7 +472,8 @@ function tabArtifacts(s){
         ${diagKind?`
         ${a.kind==='vision_c4'?'<p class="small mut" style="margin:6px 0 0">Mermaid-исходник L1/L2 — производная C4-модели из вкладки «Проектирование» и обновляется ею автоматически; правьте модель там.</p>':''}
         <label>Исходник диаграммы (Mermaid: C4Context / C4Container / C4Deployment / erDiagram)</label>
-        <textarea class="diagcode" id="d-${a.kind}" oninput="liveDiagram(this)" ${dis} ${a.kind==='vision_c4'?'readonly title="Синхронизируется из «Проектирования»"':''} placeholder="${a.kind==='vision_c4'?'C4Context · Person · System · Rel · SHOW_LEGEND()':a.kind==='data_model'?'erDiagram · USER ||--o{ ORDER : places':'C4Deployment · Deployment_Node → Container'}">${esc(cur.diagram_code||'')}</textarea>`
+        <textarea class="diagcode" id="d-${a.kind}" oninput="liveDiagram(this)" ${dis} ${a.kind==='vision_c4'?'readonly title="Синхронизируется из «Проектирования»"':''} placeholder="${a.kind==='vision_c4'?'C4Context · Person · System · Rel · SHOW_LEGEND()':a.kind==='data_model'?'erDiagram · USER ||--o{ ORDER : places':'C4Deployment · Deployment_Node → Container'}">${esc(cur.diagram_code||'')}</textarea>
+        ${diagBoost?'<p class="small mut" style="margin:6px 0 0">Обязателен для типа — начните с «✨ AI-черновик»: он сгенерирует и описание, и черновик диаграммы, затем правьте текст.</p>':''}`
         :''}
       </div>
       <div>
@@ -480,7 +483,7 @@ function tabArtifacts(s){
     </div>
     <div class="btnrow">
       <label style="margin:0;flex:1"><input id="u-${a.kind}" placeholder="Ссылка на внешнее доказательство (Confluence, репозиторий) — необязательно" value="${esc(cur.source_url||'')}" ${dis}></label>
-      <button class="sec" onclick="aiDraft(${s.id},'${a.kind}',this)" ${dis}>✨ AI-черновик</button>
+      <button class="sec" onclick="aiDraft(${s.id},'${a.kind}',this)" ${dis}>✨ AI-черновик${diagBoost?' + диаграмма':''}</button>
       <button onclick="saveArt(${s.id},'${a.kind}')" ${dis}>Сохранить (v${(cur.version||1)+1})</button>
     </div></details>`;
   }).join('');
@@ -512,9 +515,16 @@ async function aiDraft(sid, kind, btn){
     const r = await api('/ai/draft', {method:'POST', body: JSON.stringify({
       service_id:sid, kind, model: chatModelSel()})});
     $(`#a-${kind}`).value = r.content_md;
+    let diagNote = '';
+    const dEl = document.getElementById('d-'+kind);
+    if(r.diagram_code && dEl && !dEl.readOnly){
+      dEl.value = r.diagram_code;                       // черновик диаграммы (deployment/data_model)
+      renderDiag(document.getElementById('dv-'+kind), r.diagram_code);
+      diagNote = ' + черновик диаграммы';
+    }
     toast(r.provider === 'ai-buddy'
-      ? `AI-черновик (${esc(r.model||'AI-Buddy')}) вставлен — <b>требует подтверждения автора</b> (BR-28/33)`
-      : esc(r.note || 'Черновик вставлен — требует подтверждения автора (BR-28/33)'));
+      ? `AI-черновик${diagNote} (${esc(r.model||'AI-Buddy')}) вставлен — <b>требует подтверждения автора</b> (BR-28/33)`
+      : esc((r.note || 'Черновик вставлен — требует подтверждения автора (BR-28/33)')) + diagNote);
   }catch(e){ toast(esc(e.message), true); }
   if(btn){ btn.disabled = false; btn.textContent = old; }
 }

@@ -16,6 +16,23 @@ from .standards import ARTIFACT_KINDS, CHECKLIST_ITEMS, PROJECT_TYPES
 
 MIN_CONTENT = 200  # эвристика: артефакт содержательнее 200 символов
 
+# Виды, у которых AI-черновик генерирует и Mermaid-исходник диаграммы (решение 2026-11-07:
+# deployment и data_model — «пересказ реальности», где AI-черновик лучше пустого холста;
+# vision_c4 исключён — его диаграмма является производной C4-редактора «Проектирования»).
+AI_DIAG_KINDS = ("deployment", "data_model")
+_DIAG_HEADER = {"deployment": "C4Deployment", "data_model": "erDiagram"}
+
+DIAG_SYSTEM = """Ты архитектурный ассистент компании ДАТС. Составь Mermaid-исходник диаграммы
+и верни СТРОГО код Mermaid без markdown-ограждений (``` не пиши) и без пояснений.
+Правила:
+1. Для deployment верни диаграмму вида C4Deployment: вложенные Deployment_Node(окружения,
+   кластеры) → Container/ContainerDb из компонентов сервиса; для data_model — диаграмму
+   вида erDiagram: сущности из требований и API-спецификации, связи с кратностью
+   (||--o{, ||--|{, }o--|| и т.п.) и русские подписи.
+2. Опирайся только на факты о сервисе; неизвестное помечай [TODO] в подписях, не выдумывай узлы.
+3. Код должен быть валидным: баланс фигурных скобок, экранированные спецсимволы в подписях.
+4. Это черновик (advisory, BR-33): автор обязан проверить и подтвердить его."""
+
 DRAFT_SYSTEM = """Ты архитектурный ассистент компании ДАТС. Составь черновик архитектурного артефакта.
 Правила:
 1. Опирайся на требования стандарта (контекст ниже) и фактические данные сервиса. Структуру сохрани по шаблону.
@@ -90,6 +107,93 @@ def _service_facts(service_id: int, max_art: int = 400) -> str:
     return "\n".join(lines)
 
 
+def _mq(s: str) -> str:
+    """Экранирует свободный текст (имена сервисов/компонентов) для Mermaid-строк."""
+    return (s or "").replace('"', "'").replace("{", "(").replace("}", ")")
+
+
+def _mock_diagram(svc, kind: str) -> str:
+    """Skeleton-диаграмма без LLM: осмысленный стартовый Mermaid с [TODO] в подписях."""
+    comps = q("SELECT c.name, c.kind FROM components c "
+              "JOIN service_components sc ON sc.component_id=c.id "
+              "WHERE sc.service_id=? LIMIT 8", (svc["id"],))
+    if kind == "deployment":
+        # контейнеры внутри ноды приложения — из фактических компонентов каталога;
+        # БД у компонентов отдельного kind нет, поэтому ищем по имени/тех. упоминаниям
+        inner, db_line = [], ""
+        for c in comps:
+            key = f"{c['kind'] or ''} {c['name'] or ''}".lower()
+            name = _mq(c["name"]) or "[TODO]"
+            if not db_line and re.search(r"\bdb\b|database|бд|postgres|mysql|clickhouse|mongo", key):
+                db_line = f'    ContainerDb(db1, "{name}", "[TODO] тех.", "")'
+            else:
+                inner.append(f'        Container(c{len(inner) + 1}, "{name}", "[TODO] тех.", "")')
+        if not inner:
+            inner = ['        Container(c1, "[TODO] контейнер из компонентов каталога", "[TODO] тех.", "")']
+        body = "\n".join(inner)
+        return f"""C4Deployment
+title Deployment — {_mq(svc['name'])} ({svc['code']})
+
+Deployment_Node(prod, "Prod-окружение", "[TODO] кластер/хостинг"){{
+    Deployment_Node(app, "Приложение", "[TODO] k8s namespace / ВМ"){{
+{body}
+    }}
+{db_line or '    ContainerDb(db1, "[TODO] БД", "[TODO] тех.", "")'}
+}}
+
+Rel(app, db1, "[TODO] протокол доступа к данным")"""
+    # data_model
+    return """erDiagram
+    %% Черновик: сущности выведите из требований и API-спецификации
+    ENTITY_A ||--o{ ENTITY_B : "[TODO] связь"
+    ENTITY_A {
+        int id PK
+        varchar name "[TODO] поля из API-спецификации"
+    }"""
+
+
+def _clean_mermaid(text: str) -> str:
+    """Снимает markdown-ограждения, если LLM их всё же прислала."""
+    t = (text or "").strip()
+    m = re.search(r"```(?:mermaid)?\s*\n(.*?)```", t, re.DOTALL)
+    if m:
+        t = m.group(1).strip()
+    return t
+
+
+def _valid_diag(kind: str, code: str) -> bool:
+    """Санити-проверка LLM-диаграммы: правильный заголовок и баланс скобок у C4."""
+    if not code or len(code) > 12000:
+        return False
+    if not code.lstrip().startswith(_DIAG_HEADER[kind]):
+        return False
+    return not (kind == "deployment" and code.count("{") != code.count("}"))
+
+
+def draft_diagram(service_id: int, kind: str, model: str = "", svc=None) -> str | None:
+    """Mermaid-исходник диаграммы артефакта (deployment/data_model): LLM по фактам сервиса,
+    при недоступности/некорректном ответе — skeleton-фоллбек. None — для видов без диаграмм."""
+    if kind not in AI_DIAG_KINDS:
+        return None
+    svc = svc or q1("SELECT * FROM services WHERE id=?", (service_id,))
+    if not svc:
+        return None
+    skeleton = _mock_diagram(svc, kind)
+    if not llm.configured():
+        return skeleton
+    user_prompt = (f"Вид диаграммы: {_DIAG_HEADER[kind]} для артефакта «{kind}».\n\n"
+                   f"Факты о сервисе:\n{_service_facts(service_id)}\n\n"
+                   f"Составь Mermaid-исходник ({_DIAG_HEADER[kind]}) для сервиса {svc['code']}.")
+    try:
+        raw = llm.chat([{"role": "system", "content": DIAG_SYSTEM},
+                        {"role": "user", "content": user_prompt}],
+                       temperature=0.2, max_tokens=2500, model=model)
+        code = _clean_mermaid(raw)
+        return code if _valid_diag(kind, code) else skeleton
+    except llm.LLMError:
+        return skeleton
+
+
 def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
     """AI-черновик артефакта (BR-28): живой AI-Buddy по контексту сервиса и KB стандарта,
     при недоступности LLM — детерминированный шаблон (fallback)."""
@@ -97,10 +201,11 @@ def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
     art = next((a for a in ARTIFACT_KINDS if a["kind"] == kind), None)
     if not svc or not art:
         return None
+    diag = draft_diagram(service_id, kind, model=model, svc=svc)   # None — у вида нет диаграммы
     body = _mock_draft(svc, kind, art)
     if not llm.configured():
         return {"service_id": service_id, "kind": kind, "provider": "mock", "model": None,
-                "content_md": body,
+                "content_md": body, **({"diagram_code": diag} if diag else {}),
                 "note": "Черновик по шаблону стандарта (LLM не подключена) — требует подтверждения автора (BR-28/BR-33)"}
 
     # требования стандарта: релевантные чанки KB + спецификация артефакта
@@ -123,11 +228,11 @@ def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
             raise llm.LLMError("LLM вернула пустой ответ")
         return {"service_id": service_id, "kind": kind, "provider": "ai-buddy",
                 "model": (model or "").strip() or llm.config()[2],
-                "content_md": text.strip(),
+                "content_md": text.strip(), **({"diagram_code": diag} if diag else {}),
                 "note": "AI-черновик (AI-Buddy) — требует подтверждения автора (BR-28/BR-33)"}
     except llm.LLMError as e:
         return {"service_id": service_id, "kind": kind, "provider": "mock", "model": None,
-                "content_md": body,
+                "content_md": body, **({"diagram_code": diag} if diag else {}),
                 "note": f"LLM недоступна ({e}) — черновик по шаблону стандарта; требует подтверждения автора (BR-28/BR-33)"}
 
 
