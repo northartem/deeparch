@@ -8,8 +8,37 @@ const api = (path, opts={}) => fetch('/api'+path, {
 let S = { user:null, standard:null };
 /* Mermaid: C4 / deployment / ER / flowchart */
 if(window.mermaid){
-  mermaid.initialize({ startOnLoad:false, theme:'neutral', securityLevel:'strict',
-    flowchart:{ useMaxWidth:true }, c4:{ useMaxWidth:true }, er:{ useMaxWidth:true } });
+  /* фирменная тема в палитре дизайн-системы (zinc + индиго): base-тема позволяет
+     переопределить цвета; personBkg/primaryColor управляют и C4-фигурами */
+  mermaid.initialize({ startOnLoad:false, securityLevel:'strict', theme:'base',
+    themeVariables:{
+      fontFamily:'Inter, ui-sans-serif, -apple-system, Segoe UI, Roboto, sans-serif',
+      fontSize:'14px',
+      primaryColor:'#eef2ff', primaryBorderColor:'#6366f1', primaryTextColor:'#312e81',
+      secondaryColor:'#f4f4f5', tertiaryColor:'#faf5ff',
+      mainBkg:'#eef2ff', nodeBorder:'#6366f1',
+      lineColor:'#71717a', textColor:'#18181b',
+      personBkg:'#eef2ff', personBorder:'#6366f1',
+      labelTextColor:'#1e1b4b',
+      clusterBkg:'#fafafa', clusterBorder:'#e4e4e7',
+      edgeLabelBackground:'#f4f4f5' },
+    flowchart:{ useMaxWidth:true, nodeSpacing:60, rankSpacing:70, padding:10 },
+    c4:{ useMaxWidth:true, diagramMarginX:28, diagramMarginY:28, boxMargin:32, boxTextMargin:10,
+      /* фирменная светлая палитра C4 вместо классической navy (#08427B);
+         цвет текста подстраивается автоматически (_c4Contrast) */
+      person_bg_color:'#eef2ff', person_border_color:'#6366f1',
+      external_person_bg_color:'#f4f4f5', external_person_border_color:'#71717a',
+      system_bg_color:'#eef2ff', system_border_color:'#6366f1',
+      system_db_bg_color:'#eef2ff', system_db_border_color:'#6366f1',
+      system_queue_bg_color:'#eef2ff', system_queue_border_color:'#6366f1',
+      external_system_bg_color:'#f4f4f5', external_system_border_color:'#a1a1aa',
+      external_system_db_bg_color:'#f4f4f5', external_system_db_border_color:'#a1a1aa',
+      container_bg_color:'#faf5ff', container_border_color:'#a855f7',
+      container_db_bg_color:'#faf5ff', container_db_border_color:'#a855f7',
+      external_container_bg_color:'#f4f4f5', external_container_border_color:'#a1a1aa',
+      external_container_db_bg_color:'#f4f4f5', external_container_db_border_color:'#a1a1aa',
+      component_bg_color:'#ecfdf5', component_border_color:'#10b981' },
+    er:{ useMaxWidth:true } });
 }
 const esc = s => String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const badge = (txt, cls) => `<span class="badge b-${cls}">${esc(txt)}</span>`;
@@ -302,7 +331,7 @@ async function viewService(id, tab='card', frag=''){
     <span class="chip">тип: <b>${esc(S.standard.project_types[s.project_type]?.title||s.project_type)}</b></span>
     ${s.cmdb_id?`<span class="chip">CMDB: <b>${esc(s.cmdb_id)}</b></span>`:''}
     <a class="pk-hdrbtn${active==='packet'?' pk-hdrbtn-act':''}" href="#/service/${id}/packet"
-       title="Весь архитектурный пакет как документ: диаграммы, таблицы, оглавление (read-only)">📖 Пакет</a>
+       title="Весь архитектурный пакет как один документ: диаграммы, таблицы, оглавление (read-only)">${PK_ICON_BOOK} Обзор</a>
   </div>
   <div class="tabs">${tabs.map(([k,t])=>`<a class="${k===active?'act':''}" href="#/service/${id}/${k}">${t}</a>`).join('')}</div>
   <div id="tabbody"></div>`;
@@ -340,6 +369,24 @@ function splitDiagrams(code){
   if(cur) blocks.push(cur);
   return blocks.filter(b=>b.code.trim());
 }
+/* Mermaid красит текст C4-фигур белым с !important (рассчитан на тёмную классическую
+   палитру). Со светлой фирменной палитрой нужен авто-контраст: по яркости заливки
+   фигуры выбираем тёмный или белый текст. Вызывается после вставки SVG в DOM. */
+function _c4Contrast(root){
+  root.querySelectorAll('g.node.c4-shape').forEach(node => {
+    const shape = node.querySelector('[style*="fill"]');
+    const m = shape && /fill:\s*(#[0-9a-fA-F]{3,6})/.exec(shape.getAttribute('style') || '');
+    if(!m) return;
+    const hex = m[1].length === 4 ? '#' + [...m[1].slice(1)].map(c => c + c).join('') : m[1];
+    const lum = 0.299 * parseInt(hex.slice(1,3), 16) + 0.587 * parseInt(hex.slice(3,5), 16) + 0.114 * parseInt(hex.slice(5,7), 16);
+    const label = node.querySelector('g.label');
+    if(label){
+      const col = lum > 150 ? '#1e1b4b' : '#ffffff';
+      label.style.setProperty('color', col, 'important');
+      label.querySelectorAll('text').forEach(t => t.style.setProperty('fill', col, 'important'));
+    }
+  });
+}
 async function renderDiag(el, code){
   if(!el) return;
   if(!window.mermaid){ el.innerHTML = '<span class="mut small">Mermaid не загрузился</span>'; return; }
@@ -367,6 +414,7 @@ async function renderDiag(el, code){
   }
   el.classList.toggle('diag-err', bad);
   el.innerHTML = parts.join('');
+  _c4Contrast(el);
 }
 const _stepLink = (sid, t) =>
   /Заполнить артефакты/.test(t) ? `#/service/${sid}/artifacts` :
@@ -430,6 +478,8 @@ let ART_JUMP = null;              // переход из галереи «Про
 const _artFilled = k => !!(k && (((k.content_md||'').trim()) || ((k.diagram_code||'').trim())));
 
 /* ---------- Пакет: человекочитаемая вьюха архитектуры (read-only) ---------- */
+const PK_ICON_BOOK = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>';
+const PK_ICON_PENCIL = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
 function mdDoc(src){
   /* Рендер markdown пакета для чтения: escape-first, затем структурные блоки —
      код-фенсы, заголовки, GFM-таблицы, списки, абзацы, ссылки (только http/https/#).
@@ -497,7 +547,7 @@ function tabPacket(s, frag){
             html: `<section class="pk-sec" id="pk-${a.kind}">
       <h2>${esc(a.title)} ${chip}</h2>
       ${body ? mdDoc(body) : '<p class="small mut">Артефакт не заполнен — раздел появится после заполнения во вкладке «Артефакты».</p>'}
-      ${diag ? `<div class="pk-diag" id="pkd-${a.kind}"></div>` : ''}
+      ${diag ? `<div class="diag pk-diag" id="pkd-${a.kind}"></div>` : ''}
     </section>`};
   });
   const meta = `<p class="small mut" style="margin:0 0 4px">${esc(s.name)} (${esc(s.code)}) · домен: ${esc(s.domain||'—')} ·
@@ -506,9 +556,9 @@ function tabPacket(s, frag){
   $('#tabbody').innerHTML = `
     ${meta}
     <div class="pk-head">
-      <span class="small mut">Пакет в порядке Architecture Definition Set — читается как документ.
+      <span class="small mut">Обзор пакета в порядке Architecture Definition Set — читается как документ.
       Advisory: представление read-only, редактирование — во вкладке «Артефакты».</span>
-      <a class="sec pk-edit" href="#/service/${s.id}/artifacts">✏️ Редактировать</a>
+      <a class="pk-hdrbtn pk-hdrbtn-sec pk-edit" href="#/service/${s.id}/artifacts">${PK_ICON_PENCIL} Редактировать</a>
     </div>
     <nav class="pk-toc">${secs.map(x =>
       `<a class="${x.filled?'':'pk-toc-empty'}" onclick="document.getElementById('pk-${x.kind}').scrollIntoView({block:'start'})">${x.filled?'✓':'✗'} ${esc(x.title)}</a>`).join('')}</nav>
@@ -660,8 +710,8 @@ function tabReview(s){
     содержательные риски и несоответствия. Advisory (BR-33): находки не блокируют отправку —
     решение за автором и ревьюером.</p>
     <div class="btnrow">
-      <a class="sec" style="align-self:center" href="#/service/${s.id}/packet"
-         title="Человекочитаемая вьюха всего пакета: диаграммы, таблицы, оглавление">📖 Открыть пакет</a>
+      <a class="pk-hdrbtn pk-hdrbtn-sec" href="#/service/${s.id}/packet"
+         title="Человекочитаемый обзор всего пакета: диаграммы, таблицы, оглавление">${PK_ICON_BOOK} Открыть обзор</a>
       ${s.review_status==='in_review'
         ? `<span class="chip">Ревью идёт · запрошено <b>${esc(open?.requested_by||'')}</b></span>`
         : `<button id="btn-send-review" onclick="requestReview(${s.id})" ${canSend?'':'disabled'}>Отправить на ревью</button>
