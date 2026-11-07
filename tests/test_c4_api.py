@@ -259,3 +259,75 @@ def test_export_keeps_both_directions_and_escapes(client, auth, sid):
                   {"id": "u_1", "type": "system", "name": "Система", "x": 300, "y": 1}],
         "edges": [{"id": "e1", "from": "u-1", "to": "u_1", "label": "l", "tech": ""}]}}).json()["model"]
     assert [n["id"] for n in again["nodes"]] == ["u-1", "u_1"]
+
+
+# ---------- ER-редактор: модель данных как третий вид «Проектирования» ----------
+
+ER = {"nodes": [
+        {"id": "e1", "type": "entity", "name": "Заказ",
+         "attrs": [{"name": "id", "type": "uuid", "key": "PK"},
+                   {"name": "customer_id", "type": "uuid", "key": "FK"},
+                   {"name": "created_at", "type": "datetime"}], "x": 120, "y": 200},
+        {"id": "e2", "type": "entity", "name": "Позиция заказа",
+         "attrs": [{"name": "id", "type": "uuid", "key": "PK"},
+                   {"name": "qty", "type": "int"}], "x": 480, "y": 200}],
+      "edges": [{"id": "r1", "from": "e1", "to": "e2", "card": "||--o{", "label": "содержит"}]}
+
+
+def test_er_save_autosync_data_model(client, auth):
+    """ER-аналог авто-синка vision: сохранение ER-модели перегенерирует erDiagram
+    в артефакте data_model (без поднятия версии); C4-синк не запускается."""
+    A = auth["admin"]
+    sid = client.post("/api/services", headers=A, json={"code": "ER1", "name": "ER",
+                                                        "project_type": "mvp"}).json()["id"]
+    art = lambda: next(a for a in client.get(f"/api/services/{sid}", headers=A).json()["artifacts"]
+                       if a["kind"] == "data_model")
+    r = client.put(f"/api/services/{sid}/c4/er", headers=A, json={"model": ER}).json()
+    assert r["dm_synced"] is True and r["dm_code"].startswith("erDiagram")
+    assert "vision_synced" not in r and "vision_skipped" not in r
+    a = art()
+    assert a["diagram_code"].startswith("erDiagram") and "Заказ" in a["diagram_code"]
+    assert "||--o{" in a["diagram_code"] and "uuid id PK" in a["diagram_code"]
+    assert a["version"] == 1                       # производная — версия не поднимается
+    # повторное сохранение той же модели: исходник совпадает — синк не дёргает артефакт
+    r2 = client.put(f"/api/services/{sid}/c4/er", headers=A, json={"model": ER}).json()
+    assert r2["dm_synced"] is False
+    # пустая модель не затирает существующий исходник
+    client.put(f"/api/services/{sid}/c4/er", headers=A, json={"model": {"nodes": [], "edges": []}})
+    assert art()["diagram_code"] == a["diagram_code"]
+
+
+def test_er_normalization_and_dangling_edges(client, auth):
+    """Нормализация ER: битые/нестандартные поля гасятся; связь на несуществующую
+    сущность отбрасывается ещё в модели — исходник остаётся консистентным."""
+    A = auth["admin"]
+    sid = client.post("/api/services", headers=A, json={"code": "ER2", "name": "ER2",
+                                                        "project_type": "mvp"}).json()["id"]
+    m = {"nodes": [{"id": "e1", "type": "entity", "name": "Заказ",
+                    "attrs": [{"name": "id", "type": "uuid", "key": "PK"},
+                              {"name": "", "type": "int"},           # пустое имя — долой
+                              {"name": "st", "type": "x" * 40, "key": "XX"}],  # key не PK/FK
+                    "x": 1, "y": 1}],
+         "edges": [{"id": "r1", "from": "e1", "to": "ghost", "card": "кривая", "label": "битая"}]}
+    r = client.put(f"/api/services/{sid}/c4/er", headers=A, json={"model": m}).json()
+    n = r["model"]["nodes"][0]
+    assert [a["name"] for a in n["attrs"]] == ["id", "st"]
+    assert n["attrs"][1]["key"] == "" and len(n["attrs"][1]["type"]) <= 24
+    assert r["model"]["edges"] == []               # dangling-связь отброшена
+    assert r["dm_synced"] is True                  # модель после нормализации валидна
+    # кардинальности: обе записи (модельная 1--n и Mermaid-символы) нормализуются к символам
+    m2 = {"nodes": [{"id": "a", "name": "A", "attrs": []}, {"id": "b", "name": "B", "attrs": []}],
+          "edges": [{"id": "x", "from": "a", "to": "b", "card": "n--1", "label": ""},
+                    {"id": "y", "from": "b", "to": "a", "card": "}o--o{", "label": ""}]}
+    r2 = client.put(f"/api/services/{sid}/c4/er", headers=A, json={"model": m2}).json()
+    assert [e["card"] for e in r2["model"]["edges"]] == ["}o--||", "}o--o{"]
+
+
+def test_er_ai_fallback_without_llm(client, auth):
+    """AI-структура для ER без LLM → детерминированный fallback из компонентов/БД L2."""
+    A = auth["admin"]
+    sid = client.post("/api/services", headers=A, json={"code": "ER3", "name": "ER3",
+                                                        "project_type": "mvp"}).json()["id"]
+    r = client.post(f"/api/services/{sid}/c4/er/ai", headers=A, json={}).json()
+    assert r["provider"] == "fallback" and r["view"] == "er"
+    assert r["model_json"]["nodes"] and all(n["type"] == "entity" for n in r["model_json"]["nodes"])

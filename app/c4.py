@@ -1,9 +1,9 @@
-"""Проектирование: визуальная C4-модели (L1 Контекст, L2 Контейнеры).
+"""Проектирование: визуальные модели (C4 L1 Контекст, L2 Контейнеры, ER Модель данных).
 
 Сценарии: (1) ручное рисование в редакторе (палитра, drag&drop, связи — как в Archi),
 (2) AI-структура с последующим редактированием (BR-28, advisory).
-Модель хранится как JSON (источник правды для редактора); экспорт в Mermaid C4
-кладёт исходники диаграмм в артефакт vision_c4 — self-check и «Диаграммы» видят их.
+Модель хранится как JSON (источник правды для редактора); экспорт в Mermaid
+синхронизируется в артефакты: L1/L2 → vision_c4, ER → data_model.
 """
 import json
 import math
@@ -12,8 +12,13 @@ import re
 from . import ai, llm
 from .db import exec, now, q, q1
 
-VIEWS = {"context": "Контекст (L1)", "container": "Контейнеры (L2)"}
+VIEWS = {"context": "Контекст (L1)", "container": "Контейнеры (L2)",
+         "er": "Модель данных (ER)"}
 _NODE_TYPES = {"person", "system", "external", "container", "db"}
+
+# кардинальности ER-связей: ключ — значение в модели, отображение — синтаксис Mermaid
+ER_CARDS = {"1--1": "||--||", "1--n": "||--o{", "n--1": "}o--||", "n--m": "}o--o{"}
+_ER_CARD_RE = re.compile(r"\}o--\|\||\|\|--o\{|\|\|--\|\||\}o--o\{")
 
 AI_SYSTEM = """Ты архитектурный ассистент компании ДАТС. Спроектируй C4-модель архитектуры
 сервиса и верни СТРОГО JSON вида:
@@ -30,21 +35,25 @@ AI_SYSTEM = """Ты архитектурный ассистент компани
 
 
 def load(service_id: int) -> dict:
-    """Модели сервиса по видам: {context: {...}, container: {...}} (пустые — нормализованы)."""
+    """Модели сервиса по видам: {context: {...}, container: {...}, er: {...}} (пустые — нормализованы)."""
     out = {}
     for view in VIEWS:
         row = q1("SELECT model_json, updated_by, updated_at FROM c4_models "
                  "WHERE service_id=? AND view=?", (service_id, view))
         if row:
             try:
-                out[view] = normalize(json.loads(row["model_json"]))
+                out[view] = normalize(json.loads(row["model_json"]), view)
             except (ValueError, TypeError):
-                out[view] = {"nodes": [], "edges": []}
+                out[view] = _empty(view)
             out[view]["_updated_by"] = row["updated_by"]
             out[view]["_updated_at"] = row["updated_at"]
         else:
-            out[view] = {"nodes": [], "edges": []}
+            out[view] = _empty(view)
     return out
+
+
+def _empty(view: str) -> dict:
+    return {"nodes": [], "edges": []}
 
 
 _ID_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
@@ -59,12 +68,15 @@ def _new_id(kind: str, n: int, taken: set) -> str:
     return nid
 
 
-def normalize(model) -> dict:
+def normalize(model, view: str = "context") -> dict:
     """Приводит модель к каноническому виду (гасит мусор от LLM/старых версий).
 
     id допускаются только [A-Za-z0-9_-]{1,40} — они попадают в SVG-атрибуты и в
     Mermaid-алиасы; битые/дублирующиеся id переименовываются, узлы не теряются.
+    Для ER-вида узел — сущность с атрибутами, связь несёт кардинальность.
     """
+    if view == "er":
+        return _normalize_er(model)
     m = model if isinstance(model, dict) else {}
     nodes, ids = [], set()
     for n in m.get("nodes") or []:
@@ -92,6 +104,48 @@ def normalize(model) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+def _normalize_er(model) -> dict:
+    """ER-модель: узел = сущность с атрибутами [{name, type, key: PK|FK|''}],
+    связь = кардинальность (ER_CARDS) + подпись."""
+    m = model if isinstance(model, dict) else {}
+    nodes, ids = [], set()
+    for n in m.get("nodes") or []:
+        nid = str(n.get("id") or "").strip()
+        if not _ID_RE.fullmatch(nid) or nid in ids:
+            nid = _new_id("n", len(nodes) + 1, ids)
+        attrs = []
+        for a in (n.get("attrs") or [])[:16]:
+            if not isinstance(a, dict):
+                continue
+            name = str(a.get("name") or "").strip()[:40]
+            if not name:
+                continue
+            attrs.append({"name": name,
+                          "type": str(a.get("type") or "").strip()[:24] or "varchar",
+                          "key": a.get("key") if a.get("key") in ("PK", "FK") else ""})
+        nodes.append({"id": nid, "type": "entity",
+                      "name": str(n.get("name") or "Сущность")[:60],
+                      "attrs": attrs,
+                      "x": _num(n.get("x"), 480), "y": _num(n.get("y"), 280)})
+        ids.add(nid)
+    edges, eids = [], set()
+    for e in m.get("edges") or []:
+        eid = str(e.get("id") or "").strip()
+        if not _ID_RE.fullmatch(eid) or eid in eids:
+            eid = _new_id("e", len(edges) + 1, eids)
+        if e.get("from") not in ids or e.get("to") not in ids:
+            continue
+        card = str(e.get("card") or "")
+        if card in ER_CARDS:                 # модельная запись (1--n) → синтаксис Mermaid
+            card = ER_CARDS[card]
+        if not _ER_CARD_RE.fullmatch(card):
+            card = ER_CARDS["1--n"]          # 1 к N — самый частый случай
+        edges.append({"id": eid, "from": e["from"], "to": e["to"],
+                      "card": card, "label": str(e.get("label") or "")[:60]})
+        eids.add(eid)
+    return {"nodes": nodes, "edges": edges}
+
+
 def _num(v, dflt):
     """Координата: число или значение по умолчанию; NaN/inf недопустимы —
     они ломают и JSON-ответ (ValueError при сериализации), и SVG (transform=translate(nan,…))."""
@@ -105,7 +159,7 @@ def _num(v, dflt):
 def save(service_id: int, view: str, model: dict, user: str) -> dict:
     if view not in VIEWS:
         raise ValueError(f"view должен быть: {', '.join(VIEWS)}")
-    norm = normalize(model)
+    norm = normalize(model, view)
     if q1("SELECT id FROM c4_models WHERE service_id=? AND view=?", (service_id, view)):
         exec("UPDATE c4_models SET model_json=?, updated_by=?, updated_at=? "
              "WHERE service_id=? AND view=?",
@@ -128,8 +182,10 @@ def _esc_mmd(s: str) -> str:
 
 
 def gen_mermaid(model: dict, view: str) -> str:
-    """Экспорт модели в исходник Mermaid C4 (единый источник правды — исходник, не картинка)."""
-    m = normalize(model)
+    """Экспорт модели в исходник Mermaid (единый источник правды — исходник, не картинка)."""
+    if view == "er":
+        return _gen_er(model)
+    m = normalize(model, view)
     lines = ["C4Context" if view == "context" else "C4Container",
              "title " + ("System Context (L1)" if view == "context" else "Container diagram (L2)")]
     allowed = ({"person", "system", "external"} if view == "context"
@@ -172,6 +228,62 @@ def gen_mermaid(model: dict, view: str) -> str:
     return "\n".join(lines)
 
 
+def _er_entity_name(name: str, used: dict) -> str:
+    """Имя сущности для Mermaid: читаемое; при коллизии — суффикс _2/_3."""
+    base = name.strip() or "Сущность"
+    n, out = 2, base
+    while out in used:
+        out = f"{base}_{n}"
+        n += 1
+    used[out] = True
+    return out
+
+
+def _er_ref(name: str) -> str:
+    """Каноническая ссылка на сущность: простой токен как есть,
+    имя со спецсимволами — в кавычках (Mermaid 11 понимает кавычки,
+    но не % и \\ внутри них — заменяем на пробел)."""
+    tok = _er_tok(name)
+    if tok == name:
+        return tok
+    return _esc_mmd(re.sub(r"[%\\]", " ", name))
+
+
+def _gen_er(model: dict) -> str:
+    """ER-модель → erDiagram: сущности с атрибутами и связи с кардинальностью.
+    Имена читаемые (Mermaid 11 рендерит кириллицу); спецсимволы — под кавычками."""
+    m = _normalize_er(model)
+    if not m["nodes"]:
+        return ""
+    names = _er_entity_names(m)
+    lines = ["erDiagram"]
+    for n in m["nodes"]:
+        lines.append(f"    {_er_ref(names[n['id']])} {{")
+        for a in n["attrs"]:
+            key = f" {a['key']}" if a["key"] else ""
+            lines.append(f"        {_er_tok(a['type'])} {_er_tok(a['name'])}{key}")
+        lines.append("    }")
+    for e in m["edges"]:
+        if e["from"] not in names or e["to"] not in names:
+            continue
+        lines.append(f"    {_er_ref(names[e['from']])} {e['card']} "
+                     f"{_er_ref(names[e['to']])} : {_esc_mmd(e['label'] or 'относится к')}")
+    return "\n".join(lines)
+
+
+def _er_entity_names(m: dict) -> dict:
+    """id → уникальное читаемое имя сущности (коллизии гасятся суффиксом)."""
+    used, out = {}, {}
+    for n in m["nodes"]:
+        out[n["id"]] = _er_entity_name(n["name"], used)
+    return out
+
+
+def _er_tok(s: str) -> str:
+    """Токен вне кавычек erDiagram: без пробелов и кавычек."""
+    return re.sub(r'[\s"\']', "_", s.strip()) or "x"
+
+
 def build_code(service_id: int) -> str:
     """Mermaid-исходник обеих моделей (для экспорта и предпросмотра)."""
     models = load(service_id)
@@ -210,6 +322,46 @@ def validate_models(service_id: int) -> dict:
             warnings.append(f"{VIEWS[view]}: узлы без связей — "
                             f"{', '.join(isolated[:5])}" + ("…" if len(isolated) > 5 else ""))
     return {"blockers": blockers, "warnings": warnings}
+
+
+def validate_er(model: dict) -> dict:
+    """Детерминированная проверка ER-модели (структурная; содержательность — за автором)."""
+    m = _normalize_er(model)
+    blockers, warnings = [], []
+    ids = {n["id"] for n in m["nodes"]}
+    dangling = [e for e in m["edges"] if e["from"] not in ids or e["to"] not in ids]
+    if dangling:
+        blockers.append(f"ER: {len(dangling)} связей ссылаются на несуществующие сущности")
+    nokey = [n["name"] for n in m["nodes"]
+             if not any(a["key"] == "PK" for a in n["attrs"])]
+    if nokey:
+        warnings.append("ER: сущности без первичного ключа — "
+                        + ", ".join(nokey[:5]) + ("…" if len(nokey) > 5 else ""))
+    isolated = [n["name"] for n in m["nodes"]
+                if not any(e["from"] == n["id"] or e["to"] == n["id"] for e in m["edges"])]
+    if isolated and ids:
+        warnings.append("ER: сущности без связей — " + ", ".join(isolated[:5])
+                        + ("…" if len(isolated) > 5 else ""))
+    return {"blockers": blockers, "warnings": warnings}
+
+
+def sync_data_model(service_id: int) -> dict:
+    """ER-аналог sync_vision: JSON ER-модель — источник правды, erDiagram в артефакте
+    data_model — производная. Пустая модель исходник не затирает; при блокерах
+    («связи на несуществующие сущности») запись не выполняется."""
+    er = load(service_id)["er"]
+    report = validate_er(er)
+    if report["blockers"]:
+        return {"synced": False, "code": None, "skipped": report["blockers"]}
+    code = gen_mermaid(er, "er")
+    if not code:
+        return {"synced": False, "code": None, "skipped": []}
+    art = q1("SELECT id, diagram_code FROM artifacts WHERE service_id=? AND kind='data_model'",
+             (service_id,))
+    if not art or (art["diagram_code"] or "") == code:
+        return {"synced": False, "code": code, "skipped": []}
+    exec("UPDATE artifacts SET diagram_code=? WHERE id=?", (code, art["id"]))
+    return {"synced": True, "code": code, "skipped": []}
 
 
 def export_to_artifact(service_id: int, user: str) -> dict:
@@ -255,11 +407,34 @@ def sync_vision(service_id: int) -> dict:
 
 
 def _fallback_model(service_id: int, view: str) -> dict:
-    """Детерминированный старт: наша система + компоненты из каталога + пользователь."""
+    """Детерминированный старт: наша система + компоненты из каталога + пользователь;
+    для ER — сущности из БД-узлов уже сохранённого L2 (каскад L2 → ER)."""
     svc = q1("SELECT * FROM services WHERE id=?", (service_id,))
     comps = q("SELECT c.name, c.kind FROM components c "
               "JOIN service_components sc ON sc.component_id=c.id WHERE sc.service_id=? "
               "LIMIT 8", (service_id,))
+    if view == "er":
+        ents = []
+        for c in comps:
+            if "db" in (c["kind"] or "").lower() or "дан" in (c["name"] or "").lower():
+                ents.append({"id": f"n{len(ents) + 1}", "type": "entity",
+                             "name": c["name"] or f"Сущность{len(ents) + 1}",
+                             "attrs": [{"name": "id", "type": "uuid", "key": "PK"}],
+                             "x": 120 + len(ents) * 240, "y": 240})
+        l2 = load(service_id)["container"]
+        for n in l2["nodes"]:
+            if n["type"] == "db" and len(ents) < 6:
+                ents.append({"id": f"n{len(ents) + 1}", "type": "entity", "name": n["name"],
+                             "attrs": [{"name": "id", "type": "uuid", "key": "PK"}],
+                             "x": 120 + len(ents) * 240, "y": 240})
+        if not ents:
+            ents = [{"id": "n1", "type": "entity", "name": "Сущность 1 [TODO]",
+                     "attrs": [{"name": "id", "type": "uuid", "key": "PK"}], "x": 200, "y": 240},
+                    {"id": "n2", "type": "entity", "name": "Сущность 2 [TODO]",
+                     "attrs": [{"name": "id", "type": "uuid", "key": "PK"}], "x": 520, "y": 240}]
+        edges = [{"id": "e1", "from": ents[0]["id"], "to": ents[1]["id"],
+                  "card": ER_CARDS["1--n"], "label": "[TODO] связь"}] if len(ents) > 1 else []
+        return {"nodes": ents, "edges": edges}
     nodes = [{"id": "n1", "type": "person", "name": "Пользователь", "desc": "", "tech": "", "x": 120, "y": 220},
              {"id": "n2", "type": "system", "name": f"{svc['name']} ({svc['code']})",
               "desc": "Проектируемая система", "tech": "", "x": 420, "y": 220}]
@@ -301,15 +476,31 @@ def _l1_context(service_id: int) -> str:
     return "\n".join(lines)
 
 
+ER_SYSTEM = """Ты архитектурный ассистент компании ДАТС. Спроектируй ER-модель данных
+и верни СТРОГО JSON вида:
+{"nodes": [{"id":"n1","name":"Сущность",
+            "attrs":[{"name":"id","type":"uuid","key":"PK"}],
+            "x":кратные 40 координаты,"y":...}],
+ "edges": [{"id":"e1","from":"n1","to":"n2","card":"1--1|1--n|n--1|n--m","label":"смысл связи"}]}
+Правила:
+1. Сущности выводи из требований и API-спецификации — не придумывай лишнего; ключи (PK/FK) ставь осмысленно.
+2. Связи: 1--n — «один ко многим» (самая частая), 1--1, n--1, n--m — многие ко многим.
+3. Атрибуты: 2-6 ключевых полей на сущность (id, ссылки, статусные/бизнес-поля); типы: uuid, varchar, int, decimal, datetime, bool, jsonb.
+4. Координаты: холст 960x560, элементы не должны перекрываться (шаг сетки 40px).
+5. Только JSON, без пояснений."""
+
+
 def ai_design(service_id: int, view: str, model: str = "") -> dict:
-    """Сценарий 2: AI-структура — LLM проектирует C4-модель из фактов и требований.
-    Для L2 вход дополнен сохранённой L1 (каскад: контейнеры согласованы с контекстом)."""
+    """Сценарий 2: AI-структура — LLM проектирует модель из фактов и требований.
+    Для L2 вход дополнен сохранённой L1 (каскад), для ER — L2 и API-спецификацией."""
     if view not in VIEWS:
         raise ValueError(f"view должен быть: {', '.join(VIEWS)}")
     fallback = _fallback_model(service_id, view)
     if not llm.configured():
         return {"provider": "fallback", "model": None, "view": view, "model_json": fallback,
                 "note": "LLM не подключена — стартовая структура по каталогу компонентов"}
+    if view == "er":
+        return _ai_er(service_id, model, fallback)
     view_hint = ("Контекст (L1): только персоны, наш сервис и внешние системы."
                  if view == "context" else
                  "Контейнеры (L2): внутри нашего сервиса — контейнеры и БД; "
@@ -336,4 +527,38 @@ def ai_design(service_id: int, view: str, model: str = "") -> dict:
                 "note": "AI-структура (AI-Buddy) — загрузите в редактор, проверьте и поправьте (advisory, BR-33)"}
     except (llm.LLMError, ValueError, KeyError, TypeError):
         return {"provider": "fallback", "model": None, "view": view, "model_json": fallback,
+                "note": "LLM недоступна — стартовая структура по каталогу компонентов"}
+
+
+def _ai_er(service_id: int, model: str, fallback: dict) -> dict:
+    """AI-каскад для ER: сущности выводятся из API-спецификации и требований;
+    L2-модель (БД-узлы) задаёт согласованность с уже спроектированными хранилищами."""
+    l2 = load(service_id)["container"]
+    dbs = [n["name"] for n in l2["nodes"] if n["type"] == "db"]
+    parts = []
+    if dbs:
+        parts.append("Хранилища из сохранённой L2 (сущности должны их покрывать): "
+                     + ", ".join(dbs))
+    api_art = q1("SELECT content_md FROM artifacts WHERE service_id=? AND kind='api'",
+                 (service_id,))
+    if api_art and (api_art["content_md"] or "").strip():
+        parts.append("API-спецификация (источник сущностей и полей):\n"
+                     + api_art["content_md"].strip()[:2500])
+    parts += [f"Факты о сервисе:\n{ai._service_facts(service_id)}",
+              "Спроектируй ER-модель данных (Модель данных (ER)) для этого сервиса."]
+    try:
+        raw = llm.chat([{"role": "system", "content": ER_SYSTEM},
+                        {"role": "user", "content": "\n\n".join(parts)}],
+                       temperature=0.3, max_tokens=4000, model=model)
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            raise llm.LLMError("LLM вернула не JSON")
+        mj = _normalize_er(json.loads(m.group(0)))
+        if not mj["nodes"]:
+            raise llm.LLMError("LLM вернула пустую модель")
+        return {"provider": "ai-buddy", "model": (model or "").strip() or llm.config()[2],
+                "view": "er", "model_json": mj,
+                "note": "AI-структура (AI-Buddy) — загрузите в редактор, проверьте и поправьте (advisory, BR-33)"}
+    except (llm.LLMError, ValueError, KeyError, TypeError):
+        return {"provider": "fallback", "model": None, "view": "er", "model_json": fallback,
                 "note": "LLM недоступна — стартовая структура по каталогу компонентов"}
