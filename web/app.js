@@ -78,26 +78,75 @@ route(/^#\/debts$/, viewDebts);
 route(/^#\/assistant$/, viewAssistant);
 route(/^#\/access$/, async () => { SVC_CACHE = await api('/services'); return viewAccess(); });
 
+const FIT_DOT = f => !f ? '<span class="mut" title="Фитнес-проверки не запускались">○ нет</span>'
+  : f.failed ? `<span style="color:var(--bad)" title="${f.failed} красных">● ${f.failed} красн.</span>`
+  : f.warned ? `<span style="color:var(--warn)" title="${f.warned} предупреждений">● ${f.warned} предупр.</span>`
+  : '<span style="color:var(--ok)" title="Все проверки зелёные">● ok</span>';
+const fmtTs = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : '';
+
 async function viewDash(){
   const d = await api('/dashboard');
   const st = s => d.by_review_status.find(x=>x.review_status===s)?.n||0;
+  const dp = p => d.debt_by_priority.find(x=>x.priority===p)?.n||0;
+  const debtOpen = dp('P0') + dp('P1') + dp('P2') + dp('P3');
+  const covCard = (t, list, link) => `<div class="card"><div class="mut">${t}</div>
+    <div class="kpi" style="color:${list.length ? 'var(--warn)' : 'var(--ok)'}">${list.length}</div>
+    <div class="small mut">${list.length ? esc(list.map(x=>x.code).join(', ')) : 'покрыто полностью'}${link ? ` · <a class="lnk" href="${link}">реестр</a>` : ''}</div></div>`;
   $('#view').innerHTML = `
   <h1>Дашборд соответствия стандарту</h1>
   <p class="mut"><a class="lnk" href="${d.standard_ref}" target="_blank">Общий архитектурный стандарт (Architecture Definition Set) ↗</a></p>
-  <div class="grid g3" style="margin:18px 0">
+  <div class="grid g4" style="margin:18px 0">
     <div class="card vio"><div class="mut">Сервисов в реестре</div><div class="kpi">${d.total_services}</div></div>
     <div class="card"><div class="mut">На ревью / согласовано</div><div class="kpi">${st('in_review')} <span class="mut" style="font-size:16px">/</span> <span style="color:var(--ok)">${st('approved')}</span></div></div>
     <div class="card cya"><div class="mut">Нужны изменения</div><div class="kpi" style="color:var(--warn)">${st('changes_requested')}</div></div>
+    <div class="card"><div class="mut">Открытый техдолг P0+P1</div><div class="kpi" style="color:${dp('P0')+dp('P1') ? 'var(--bad)' : 'var(--ok)'}">${dp('P0')+dp('P1')}</div><div class="small mut">всего открытых: ${debtOpen}</div></div>
   </div>
-  <h2>Последняя активность</h2>
-  <div class="card"><table><tr><th>Сервис</th><th>Self-check</th><th>Статус ревью</th></tr>
-  ${d.recent.map(r=>`<tr><td><a class="lnk" href="#/service/${r.id}"><b>${esc(r.name)}</b> <span class="mut">${esc(r.code)}</span></a></td>
-    <td><div class="bar" style="width:130px"><i style="width:${r.score||0}%"></i></div><span class="small mut">${r.score||0}%</span></td>
-    <td>${statusB(r.review_status)}</td></tr>`).join('')}
+  ${(d.my_tasks.pending_reviews.length || d.my_tasks.blockers.length) ? `
+  <h2>Мои задачи</h2>
+  <div class="grid g2" style="margin:14px 0">
+    ${d.my_tasks.pending_reviews.length ? `<div class="card"><div class="mut" style="margin-bottom:8px">Ждут моего решения по ревью</div>
+      ${d.my_tasks.pending_reviews.map(r=>`<div style="margin:6px 0"><a class="lnk" href="#/service/${r.service_id}"><b>${esc(r.code)}</b> ${esc(r.name)}</a>
+        <span class="small mut">· запросил ${esc(r.requested_by)} ${fmtTs(r.requested_at)}</span></div>`).join('')}</div>` : ''}
+    ${d.my_tasks.blockers.length ? `<div class="card"><div class="mut" style="margin-bottom:8px">Блокеры в моих сервисах</div>
+      ${d.my_tasks.blockers.map(b=>`<div style="margin:6px 0"><a class="lnk" href="#/service/${b.id}"><b>${esc(b.code)}</b> ${esc(b.name)}</a>
+        <span class="small mut">· ${b.why.map(esc).join(' · ')}</span></div>`).join('')}</div>` : ''}
+  </div>` : `<p class="mut" style="margin:14px 0">На вас ничего не висит — ожидающих ревью и блокеров в ваших сервисах нет.</p>`}
+  <h2>Готовность к ревью</h2>
+  <div class="card"><table><tr><th>Сервис</th><th>Обязательные артефакты</th><th>Self-check</th><th>Фитнес</th><th>Техдолг</th><th>Ревью</th><th>Следующий шаг</th></tr>
+  ${d.readiness.map(r=>{
+    const fill = r.mandatory_total - r.mandatory_missing.length;
+    return `<tr><td><a class="lnk" href="#/service/${r.id}"><b>${esc(r.name)}</b> <span class="mut">${esc(r.code)}</span></a></td>
+    <td><b>${fill}/${r.mandatory_total}</b>${r.mandatory_missing.length ? `<div class="small mut">нет: ${esc(r.mandatory_missing.map(m=>m.title).join(', '))}</div>` : '<div class="small" style="color:var(--ok)">все обязательные заполнены</div>'}</td>
+    <td>${r.self_check == null ? '<span class="mut">не проводился</span>' : `<div class="bar" style="width:110px"><i style="width:${r.self_check}%"></i></div><span class="small mut">${r.self_check}%</span>`}</td>
+    <td>${FIT_DOT(r.fitness)}</td>
+    <td>${r.debts_open ? `<span ${r.debts_p0 ? 'style="color:var(--bad);font-weight:600"' : ''}>${r.debts_open}</span> <span class="mut small">откр.</span>` : '<span class="mut">—</span>'}</td>
+    <td>${statusB(r.review_status)}</td>
+    <td class="small">${esc(r.hint)}</td></tr>`;
+  }).join('')}
   </table></div>
+  <h2>Риски и техдолг</h2>
+  <div class="grid g4" style="margin:14px 0">
+    ${['P0','P1','P2','P3'].map(p=>`<div class="card"><div class="mut">Приоритет ${p}</div>
+      <div class="kpi" style="color:${p==='P0'&&dp(p) ? 'var(--bad)' : dp(p) ? 'var(--txt)' : 'var(--ok)'}">${dp(p)}</div></div>`).join('')}
+  </div>
+  ${d.debt_top.length ? `<div class="card"><table><tr><th>ID</th><th>Пункт долга</th><th>Сервис</th><th>Приоритет</th><th>Риск</th><th>Статус</th></tr>
+  ${d.debt_top.map(t=>`<tr><td class="small mut">${esc(t.debt_id)}</td><td>${esc(t.title)}</td>
+    <td>${t.service_id ? `<a class="lnk" href="#/service/${t.service_id}">${esc(t.code)}</a>` : '<span class="mut">—</span>'}</td>
+    <td><b>${esc(t.priority)}</b></td><td>${esc(t.risk)}</td><td>${statusB(t.status)}</td></tr>`).join('')}
+  </table><p class="small mut" style="margin:10px 0 0"><a class="lnk" href="#/debts">весь техдолг →</a></p></div>`
+  : '<p class="mut">Открытых пунктов P0/P1 нет.</p>'}
+  <h2>Покрытие процессом</h2>
+  <div class="grid g3" style="margin:14px 0">
+    ${covCard('Сервисов без требований (ФТ/НФТ)', d.coverage.no_requirements, '#/services')}
+    ${covCard('Сервисов без C4-модели', d.coverage.no_c4, '#/services')}
+    ${covCard('Сервисов без self-check', d.coverage.no_checklist, '#/services')}
+  </div>
+  ${d.activity.length ? `<h2>Последние события</h2>
+  <div class="card"><table class="small">${d.activity.slice(0,8).map(a=>`<tr><td class="mut" style="white-space:nowrap">${fmtTs(a.ts)}</td><td>${esc(a.user)}</td>
+    <td>${esc(a.action)}</td><td class="mut">${esc(a.entity)}${a.detail ? ' · ' + esc(String(a.detail)).slice(0,60) : ''}</td></tr>`).join('')}</table></div>` : ''}
   <h2>Переиспользование компонентов</h2>
   <div class="card"><table><tr><th>Компонент</th><th>Статус</th><th>Используют сервисов</th></tr>
-  ${d.component_usage.map(c=>`<tr><td>${esc(c.name)}</td><td>${statusB(c.status)}</td><td><b>${c.used_by}</b></td></tr>`).join('')}
+  ${d.component_usage.map(c=>`<tr><td>${esc(c.name)}</td><td>${statusB(c.status)}</td><td><b>${c.used_by}</b>${c.used_by ? '' : ' <span class="small mut">— нет потребителей</span>'}</td></tr>`).join('')}
   </table></div>
   <footer>DeepArch MVP · BR-01…37 · источники: Architecture Definition Set (Confluence DA), self-check (10 пунктов), матрица типов проектов</footer>`;
 }

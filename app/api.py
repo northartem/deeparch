@@ -532,8 +532,12 @@ def catalog_export(sid: int, user=Depends(current_user)):
 
 # ---------- дашборд и аудит ----------
 
+_KIND_TITLES = {a["kind"]: a["title"] for a in ARTIFACT_KINDS}
+
+
 @router.get("/dashboard")
 def dashboard(user=Depends(current_user)):
+    """Агрегаты главной страницы. Все ключи аддитивны: прежние потребители не ломаются."""
     total = q1("SELECT COUNT(*) AS n FROM services")["n"]
     by_status = q("SELECT review_status, COUNT(*) AS n FROM services GROUP BY review_status")
     latest = q("""SELECT s.id, s.code, s.name, s.review_status,
@@ -542,9 +546,107 @@ def dashboard(user=Depends(current_user)):
     comp_usage = q("""SELECT c.name, c.status, COUNT(sc.service_id) AS used_by
                        FROM components c LEFT JOIN service_components sc ON sc.component_id=c.id
                        GROUP BY c.id ORDER BY used_by DESC""")
+
+    svcs = q("SELECT * FROM services ORDER BY updated_at DESC")
+    # заполненные артефакты (не пустые) по сервисам
+    filled = {}
+    for a in q("SELECT service_id, kind FROM artifacts WHERE content_md != ''"):
+        filled.setdefault(a["service_id"], set()).add(a["kind"])
+    last_check = {r["service_id"]: r for r in q(
+        "SELECT service_id, score_pct, mandatory_missing, MAX(created_at) AS m "
+        "FROM checklist_runs GROUP BY service_id")}
+    last_fit = {r["service_id"]: r for r in q(
+        "SELECT service_id, passed, failed, warned, MAX(created_at) AS m "
+        "FROM fitness_runs GROUP BY service_id")}
+    open_debts = {r["service_id"]: dict(r) for r in q(
+        "SELECT service_id, COUNT(*) AS n, "
+        "SUM(CASE WHEN priority='P0' THEN 1 ELSE 0 END) AS p0, "
+        "SUM(CASE WHEN priority='P1' THEN 1 ELSE 0 END) AS p1 "
+        "FROM tech_debts WHERE status NOT IN ('repaid','cancelled') GROUP BY service_id")}
+
+    # --- R1: готовность к ревью — составляющие отдельно, без «единой выдуманной цифры» ---
+    def _hint(s, missing, ch, fit):
+        # приоритет подсказки: заполнение → self-check → красный фитнес → статусы ревью
+        if missing:
+            return "Заполнить: " + ", ".join(_KIND_TITLES.get(k, k) for k in missing)
+        if not ch or ch["mandatory_missing"] > 0:
+            return "Пройти self-check"
+        if fit and fit["failed"]:
+            return f"Устранить красные фитнес-проверки ({fit['failed']})"
+        if s["review_status"] == "in_review":
+            return "Ждёт решения по ревью"
+        if s["review_status"] == "changes_requested":
+            return "Доработать по замечаниям"
+        if s["review_status"] == "approved":
+            return "Согласовано"
+        return "Готов к запросу ревью"
+
+    readiness = []
+    for s in svcs:
+        mandatory = _mandatory_kinds(s["project_type"])
+        missing = [k for k in mandatory if k not in filled.get(s["id"], set())]
+        ch, fit, deb = last_check.get(s["id"]), last_fit.get(s["id"]), open_debts.get(s["id"], {})
+        readiness.append({
+            "id": s["id"], "code": s["code"], "name": s["name"],
+            "review_status": s["review_status"],
+            "mandatory_total": len(mandatory),
+            "mandatory_missing": [{"kind": k, "title": _KIND_TITLES.get(k, k)} for k in missing],
+            "self_check": ch["score_pct"] if ch else None,
+            "fitness": ({"failed": fit["failed"], "warned": fit["warned"]} if fit else None),
+            "debts_open": deb.get("n", 0), "debts_p0": deb.get("p0", 0), "debts_p1": deb.get("p1", 0),
+            "hint": _hint(s, missing, ch, fit),
+        })
+    # сверху — сервисы с незакрытыми обязательными артефактами, затем с худшим self-check
+    readiness.sort(key=lambda r: (-len(r["mandatory_missing"]),
+                                  r["self_check"] if r["self_check"] is not None else 0))
+
+    # --- R2: что ждёт меня ---
+    my_tasks = {"pending_reviews": [], "blockers": []}
+    if has_global(user, "review.decide") or in_committee(user["username"]):
+        my_tasks["pending_reviews"] = q(
+            "SELECT r.id, r.service_id, r.requested_by, r.requested_at, s.code, s.name "
+            "FROM reviews r JOIN services s ON s.id = r.service_id "
+            "WHERE r.status='in_review' ORDER BY r.requested_at DESC")
+    for s in svcs:
+        if service_scope(user, s) == "none":
+            continue
+        deb, fit = open_debts.get(s["id"], {}), last_fit.get(s["id"])
+        why = []
+        if s["review_status"] == "changes_requested":
+            why.append("доработка после ревью")
+        if fit and fit["failed"]:
+            why.append(f"фитнес: {fit['failed']} красных")
+        if deb.get("p0"):
+            why.append(f"техдолг: P0 ×{deb['p0']}")
+        if why:
+            my_tasks["blockers"].append({"id": s["id"], "code": s["code"], "name": s["name"], "why": why})
+
+    # --- R3: риски и техдолг ---
+    debt_by_priority = q("SELECT priority, COUNT(*) AS n FROM tech_debts "
+                         "WHERE status NOT IN ('repaid','cancelled') GROUP BY priority")
+    debt_top = q(
+        "SELECT d.debt_id, d.title, d.priority, d.risk, d.status, d.service_id, s.code, s.name "
+        "FROM tech_debts d LEFT JOIN services s ON s.id = d.service_id "
+        "WHERE d.status NOT IN ('repaid','cancelled') AND d.priority IN ('P0','P1') "
+        "ORDER BY CASE d.priority WHEN 'P0' THEN 0 ELSE 1 END, "
+        "CASE d.risk WHEN 'Critical' THEN 0 WHEN 'High' THEN 1 WHEN 'Medium' THEN 2 ELSE 3 END LIMIT 5")
+
+    # --- R5: покрытие процессом ---
+    coverage = {
+        "no_requirements": q("SELECT code FROM services WHERE id NOT IN (SELECT DISTINCT service_id FROM requirements)"),
+        "no_c4": q("SELECT code FROM services WHERE id NOT IN (SELECT DISTINCT service_id FROM c4_models)"),
+        "no_checklist": q("SELECT code FROM services WHERE id NOT IN (SELECT DISTINCT service_id FROM checklist_runs)"),
+    }
+
+    # --- R6: активность — только тем, у кого есть право на журнал аудита ---
+    can_audit = has_global(user, "audit.view") or user["role"] == "admin"
+    activity = q("SELECT ts, user, action, entity, detail FROM audit_log ORDER BY ts DESC LIMIT 12") if can_audit else []
+
     return {"total_services": total, "by_review_status": by_status, "recent": latest,
-            "component_usage": comp_usage,
-            "standard_ref": STANDARD_REF}
+            "component_usage": comp_usage, "standard_ref": STANDARD_REF,
+            "readiness": readiness, "my_tasks": my_tasks,
+            "debt_by_priority": debt_by_priority, "debt_top": debt_top,
+            "coverage": coverage, "activity": activity}
 
 
 @router.get("/audit")
