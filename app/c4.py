@@ -228,6 +228,32 @@ def export_to_artifact(service_id: int, user: str) -> dict:
     return {"ok": True, "updated": True, "code_len": len(code)}
 
 
+def sync_vision(service_id: int) -> dict:
+    """Авто-синхронизация: JSON-модель — источник правды архитектуры (решение 2026-11-07),
+    Mermaid-исходник в артефакте vision_c4 — производная. Вызывается при каждом сохранении
+    вида из редактора; версию артефакта не поднимает (версия — история ручных правок
+    документа) и пустыми моделями исходник не затирает.
+
+    Валидация уважается и при автосохранении: при блокирующих проблемах модели
+    («в L1 нет нашего сервиса», «обе модели пусты») запись НЕ выполняется — иначе
+    невалидная производная закрыла бы пункты готовности формально. Причины возврата
+    в skipped — редактор показывает их в статус-чипе.
+    Возвращает {synced, code, skipped}: code — актуальный исходник (для обновления
+    галереи без перезагрузки)."""
+    report = validate_models(service_id)
+    if report["blockers"]:
+        return {"synced": False, "code": None, "skipped": report["blockers"]}
+    code = build_code(service_id)
+    if not code:
+        return {"synced": False, "code": None, "skipped": []}
+    art = q1("SELECT id, diagram_code FROM artifacts WHERE service_id=? AND kind='vision_c4'",
+             (service_id,))
+    if not art or (art["diagram_code"] or "") == code:
+        return {"synced": False, "code": code, "skipped": []}
+    exec("UPDATE artifacts SET diagram_code=? WHERE id=?", (code, art["id"]))
+    return {"synced": True, "code": code, "skipped": []}
+
+
 def _fallback_model(service_id: int, view: str) -> dict:
     """Детерминированный старт: наша система + компоненты из каталога + пользователь."""
     svc = q1("SELECT * FROM services WHERE id=?", (service_id,))

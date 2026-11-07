@@ -16,17 +16,16 @@ def _make_service(client, auth, code):
 
 
 def _in_review(client, auth, sid):
-    """Переводит сервис в in_review через реальные API: заполнение → self-check → ревью."""
+    """Переводит сервис в in_review через реальные API: заполнение → ревью
+    (готовность фиксируется автоматически при отправке, ручной self-check упразднён)."""
     A = auth["admin"]
+    r = client.patch(f"/api/services/{sid}", headers=A,
+                     json={"owner": "a.larshin", "domain": "Payments"})
+    assert r.status_code == 200, r.text
     for kind in ["vision_c4", "api", "data_model", "config_build"]:
         r = client.put(f"/api/services/{sid}/artifacts/{kind}", headers=A,
                        json={"content_md": f"# {kind}\nтекст"})
         assert r.status_code == 200, r.text
-    std = client.get("/api/standard", headers=A).json()
-    answers = [{"item_id": c["id"], "grade": "E", "link": "https://confluence.dats.tech/x"}
-               for c in std["checklist"]]
-    r = client.post(f"/api/services/{sid}/checklist", headers=A, json={"answers": answers})
-    assert r.status_code == 200, r.text
     r = client.post(f"/api/services/{sid}/reviews", headers=A, json={"comment": "прошу ревью"})
     assert r.status_code == 200, r.text
 

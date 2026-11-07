@@ -124,6 +124,51 @@ def _mandatory_kinds(project_type):
     return [k for k, v in pt.get("matrix", {}).items() if v == "mandatory"]
 
 
+def _auto_checklist(svc) -> list[dict]:
+    """Готовность к ревью вычисляется из данных DeepArch (принцип «всё хранится в платформе»):
+    пункт = «Есть», если его артефакт заполнен. Ручные оценки Е/Ч/Н упразднены —
+    человеческое суждение остаётся у ревьюера, а не в формальной таблице."""
+    sid = svc["id"]
+    answers = []
+    for it in CHECKLIST_ITEMS:
+        href = f"#/service/{sid}/artifacts" if it["artifact"] else f"#/service/{sid}/card"
+        if it["artifact"] is None:                       # пункт 10 — карточка сервиса
+            filled = bool(svc["name"] and (svc["owner"] or "").strip() and (svc["domain"] or "").strip())
+        else:
+            a = q1("SELECT content_md, diagram_code FROM artifacts WHERE service_id=? AND kind=?",
+                   (sid, it["artifact"]))
+            filled = bool(a and ((a["content_md"] or "").strip() or (a["diagram_code"] or "").strip()))
+        answers.append({"item_id": it["id"], "grade": "E" if filled else "N", "link": href})
+    return answers
+
+
+def _auto_blockers(svc, answers) -> list[str]:
+    """Блокируют пункты обязательного набора матрицы типа проекта («минимальные
+    наборы» стандарта — авторитетный источник gate) и пункт «Карточка сервиса».
+    Веса чек-листа остаются в скоринге и истории, но тип проекта точнее отражает
+    требования: ADR для mvp — desired, модель данных — mandatory."""
+    sid = svc["id"]
+    mandatory_kinds = set(_mandatory_kinds(svc["project_type"]))
+    by_id = {a["item_id"]: a for a in answers}
+    blockers = [it["item"] for it in CHECKLIST_ITEMS
+                if by_id[it["id"]]["grade"] != "E"
+                and (it["artifact"] is None or it["artifact"] in mandatory_kinds)]
+    # виды артефактов, обязательные по матрице, но не покрытые пунктами чек-листа
+    # (threat_model, drp_bcp для critical) — проверяем напрямую
+    covered = {it["artifact"] for it in CHECKLIST_ITEMS if it["artifact"]}
+    for kind in mandatory_kinds - covered:
+        a = q1("SELECT content_md, diagram_code FROM artifacts WHERE service_id=? AND kind=?",
+               (sid, kind))
+        if not (a and ((a["content_md"] or "").strip() or (a["diagram_code"] or "").strip())):
+            blockers.append(next((t["title"] for t in ARTIFACT_KINDS if t["kind"] == kind), kind))
+    return blockers
+
+
+def _checklist_score(answers) -> float:
+    score = sum(GRADES[a["grade"]] for a in answers)
+    return round(100.0 * score / len(CHECKLIST_ITEMS), 1)
+
+
 def _next_steps(svc) -> list[str]:
     """Живые Next Steps для карточки сервиса: что реально мешает готовности к ревью
     (в отличие от статического списка factory при создании)."""
@@ -138,15 +183,14 @@ def _next_steps(svc) -> list[str]:
         steps.append("Заполнить артефакты: " + ", ".join(titles))
     if not q1("SELECT id FROM c4_models WHERE service_id=? LIMIT 1", (svc["id"],)):
         steps.append("Нарисовать C4-модель (контекст/контейнеры) и экспортировать в Architecture Vision")
-    if not q1("SELECT id FROM checklist_runs WHERE service_id=? AND answers != '[]' "
-              "ORDER BY created_at DESC LIMIT 1", (svc["id"],)):
-        steps.append("Пройти self-check (10 пунктов Е/Ч/Н)")
+    if not (svc["owner"] or "").strip() or not (svc["domain"] or "").strip():
+        steps.append("Заполнить карточку сервиса: владелец и домен")
     if svc["review_status"] == "draft":
-        steps.append("Отправить сервис на ревью эксперту домена")
+        steps.append("Отправить сервис на ревью эксперту домена — готовность проверится автоматически")
     elif svc["review_status"] == "in_review":
         steps.append("Ожидается решение ревьюера")
     if not steps:
-        steps.append("Готов к ревью — обязательные артефакты, self-check и ревью закрыты")
+        steps.append("Готов к ревью — обязательные артефакты и ревью закрыты")
     return steps
 
 
@@ -178,6 +222,32 @@ def get_service(sid: int, user=Depends(current_user)):
     svc["fitness_last"] = dict(run) if run else None     # MVP2 BR-42
     svc["next_steps"] = _next_steps(svc)                 # живой список «что осталось»
     return svc
+
+
+@router.get("/services/{sid}/readiness")
+def service_readiness(sid: int, user=Depends(current_user)):
+    """Живой ответ на вопрос «всё ли у меня есть перед отправкой на ревью» —
+    без записи в БД (чек-ран фиксируется в момент отправки)."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    answers = _auto_checklist(svc)
+    blockers = _auto_blockers(svc, answers)
+    pt_matrix = PROJECT_TYPES.get(svc["project_type"], {}).get("matrix", {})
+    by_id = {it["id"]: it for it in CHECKLIST_ITEMS}
+    # blocking — из матрицы типа проекта (как в _auto_blockers); matrix — для подписей UI
+    def _matrix_status(it):
+        return "mandatory" if it["artifact"] is None else pt_matrix.get(it["artifact"], "optional")
+    items = [{"item_id": a["item_id"], "item": by_id[a["item_id"]]["item"],
+              "weight": by_id[a["item_id"]]["weight"], "matrix": _matrix_status(by_id[a["item_id"]]),
+              "grade": a["grade"], "link": a["link"],
+              "blocking": a["grade"] != "E" and _matrix_status(by_id[a["item_id"]]) == "mandatory"}
+             for a in answers]
+    last = q1("SELECT score_pct, created_at, created_by FROM checklist_runs "
+              "WHERE service_id=? ORDER BY created_at DESC LIMIT 1", (sid,))
+    return {"service_id": sid, "ready": not blockers, "blockers": blockers,
+            "score_pct": _checklist_score(answers), "items": items,
+            "last_run": dict(last) if last else None}
 
 
 @router.patch("/services/{sid}")
@@ -313,10 +383,17 @@ def request_review(sid: int, body=Body(...), user=Depends(current_user)):
         raise HTTPException(403, "Нет прав на этот сервис")
     if svc["review_status"] == "in_review":
         raise HTTPException(409, "Ревью уже идёт")
-    last = q1("SELECT * FROM checklist_runs WHERE service_id=? ORDER BY created_at DESC LIMIT 1", (sid,))
-    has_answers = last and len(json.loads(last["answers"])) > 0
-    if not has_answers or last["mandatory_missing"] > 0:
-        raise HTTPException(409, "Self-check не пройден: есть незакрытые обязательные пункты. Сначала закройте чек-лист.")
+    # Готовность вычисляется автоматически из данных DeepArch (ручной self-check
+    # упразднён); чек-ран фиксируется в момент отправки — история проверок сохраняется
+    answers = _auto_checklist(svc)
+    blockers = _auto_blockers(svc, answers)
+    if blockers:
+        raise HTTPException(409, "Сервис не готов к ревью — не закрыты обязательные пункты: "
+                                 + "; ".join(blockers) + ". Заполните артефакты в DeepArch.")
+    score_pct = _checklist_score(answers)
+    exec("INSERT INTO checklist_runs(service_id,answers,score_pct,mandatory_missing,created_by,created_at) VALUES(?,?,?,?,?,?)",
+         (sid, json.dumps(answers), score_pct, 0, user["username"], now()))
+    audit(user, "self_check_auto", f"service:{svc['code']}", f"score={score_pct}% (авто при отправке на ревью)")
     rid = exec("INSERT INTO reviews(service_id,requested_by,requested_at,status,comment) VALUES(?,?,?,?,?)",
                (sid, user["username"], now(), "in_review", body.get("comment")))
     exec("UPDATE services SET review_status='in_review', updated_at=? WHERE id=?", (now(), sid))
@@ -565,9 +642,16 @@ def c4_put(sid: int, view: str, body=Body(...), user=Depends(current_user)):
         norm = c4mod.save(sid, view, body.get("model") or {}, user["username"])
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    # JSON-модель — источник правды: Mermaid-исходник в артефакте Vision перегенерируется
+    # автоматически; при блокирующих проблемах модели запись не выполняется (gate не слабее)
+    vs = c4mod.sync_vision(sid)
+    note = (" vision:synced" if vs["synced"]
+            else (" vision:skipped: " + "; ".join(vs["skipped"]) if vs["skipped"] else ""))
     audit(user, "c4_save", f"service:{sid}/{view}",
-          f"nodes:{len(norm['nodes'])} edges:{len(norm['edges'])}")
-    return {"ok": True, "model": norm}
+          f"nodes:{len(norm['nodes'])} edges:{len(norm['edges'])}" + note)
+    return {"ok": True, "model": norm, "vision_synced": vs["synced"],
+            "vision_skipped": vs["skipped"],
+            **({"vision_code": vs["code"]} if vs["synced"] else {})}
 
 
 @router.post("/services/{sid}/c4/{view}/ai")

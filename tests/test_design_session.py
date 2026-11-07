@@ -54,7 +54,7 @@ def test_design_session_full_flow(client, auth):
     assert len(svc["requirements"]) == len(d["requirements"])
     # scaffold заполнил шаблоны → шаг «Заполнить артефакты» уже закрыт
     assert not any("Заполнить артефакты" in s for s in svc["next_steps"])
-    assert any("self-check" in s for s in svc["next_steps"])
+    assert any("Отправить сервис на ревью" in s for s in svc["next_steps"])
     assert any("C4-модель" in s for s in svc["next_steps"])
 
     # сохранённая C4-модель закрывает шаг C4
@@ -65,13 +65,11 @@ def test_design_session_full_flow(client, auth):
     steps = client.get(f"/api/services/{sid}", headers=A).json()["next_steps"]
     assert not any("C4-модель" in s for s in steps)
 
-    # отвеченный self-check закрывает шаг self-check
-    std = client.get("/api/standard", headers=A).json()
-    answers = [{"item_id": c["id"], "grade": "E", "link": "https://confluence.dats.tech/ds"} for c in std["checklist"]]
-    rc = client.post(f"/api/services/{sid}/checklist", headers=A, json={"answers": answers})
+    # заполнение карточки закрывает последний блокер авто-gate готовности
+    rc = client.patch(f"/api/services/{sid}", headers=A, json={"domain": "Payments"})
     assert rc.status_code == 200, rc.text
     steps = client.get(f"/api/services/{sid}", headers=A).json()["next_steps"]
-    assert not any("self-check" in s for s in steps)
+    assert not any("Заполнить карточку" in s for s in steps)
 
     # запрос ревью закрывает последний шаг
     rv = client.post(f"/api/services/{sid}/reviews", headers=A, json={"comment": "прошу ревью"})
@@ -91,9 +89,9 @@ def test_next_steps_done_state(client, auth):
     client.put(f"/api/services/{svc['id']}/c4/context", headers=A,
                json={"model": {"nodes": [{"id": "n1", "type": "system", "name": "DS1", "x": 1, "y": 1}],
                                "edges": []}})
-    std = client.get("/api/standard", headers=A).json()
-    answers = [{"item_id": c["id"], "grade": "E", "link": "https://confluence.dats.tech/ds"} for c in std["checklist"]]
-    client.post(f"/api/services/{svc['id']}/checklist", headers=A, json={"answers": answers})
+    # авто-gate готовности: карточка (name+owner+domain) должна быть заполнена
+    rc = client.patch(f"/api/services/{svc['id']}", headers=A, json={"domain": "Web"})
+    assert rc.status_code == 200, rc.text
     client.post(f"/api/services/{svc['id']}/reviews", headers=A, json={"comment": "ok"})
     # решение ревью — approve
     rid = client.get(f"/api/services/{svc['id']}", headers=A).json()["reviews"][0]["id"]

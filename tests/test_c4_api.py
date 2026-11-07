@@ -56,7 +56,10 @@ def test_full_cycle_save_read_export(client, auth, sid):
     assert "C4Context" in dry["code"] and "C4Container" in dry["code"]
     vc4 = next(a for a in client.get(f"/api/services/{sid}", headers=A).json()["artifacts"]
                if a["kind"] == "vision_c4")
-    assert (vc4["diagram_code"] or "") == "" and vc4["version"] == 1
+    # авто-синхронизация: сохранение модели уже перегенерировало исходник в Vision
+    # (версия не поднята — она только для ручных правок документа)
+    assert "C4Context" in (vc4["diagram_code"] or "") and "C4Container" in (vc4["diagram_code"] or "")
+    assert vc4["version"] == 1
 
     # экспорт записывает исходник
     exp = client.post(f"/api/services/{sid}/c4/export", headers=A, json={}).json()
@@ -126,6 +129,48 @@ def test_export_validation_report(client, auth, sid, monkeypatch):
     assert any("не нарисованы" in w for w in rep["warnings"])
     ok = client.post(f"/api/services/{sid}/c4/export", headers=A, json={})
     assert ok.status_code == 200 and "validation" in ok.json()
+
+
+def test_autosync_vision_on_model_save(client, auth):
+    """JSON-модель — источник правды архитектуры (решение 2026-11-07): каждое сохранение
+    вида из редактора перегенерирует Mermaid-исходник в артефакте vision_c4 без поднятия
+    версии; пустые модели существующий исходник не затирают."""
+    A = auth["admin"]
+    sid = client.post("/api/services", headers=A, json={"code": "SYN1", "name": "Sync",
+                                                        "project_type": "mvp"}).json()["id"]
+    art = lambda: next(a for a in client.get(f"/api/services/{sid}", headers=A).json()["artifacts"]
+                       if a["kind"] == "vision_c4")
+    r = client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": L1}).json()
+    assert r["vision_synced"] is True
+    a1 = art()
+    assert "C4Context" in a1["diagram_code"] and a1["version"] == 1
+    r2 = client.put(f"/api/services/{sid}/c4/container", headers=A, json={"model": L2}).json()
+    assert r2["vision_synced"] is True
+    a2 = art()
+    assert "C4Container" in a2["diagram_code"] and a2["version"] == 1
+    # производная всегда отражает актуальные модели: очистили L1 → в исходнике только L2;
+    # обе модели пусты → build_code пуст, sync пропускается и существующий исходник не стирается
+    client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": {"nodes": [], "edges": []}})
+    a3 = art()
+    assert "C4Container" in a3["diagram_code"] and "C4Context" not in a3["diagram_code"]
+    client.put(f"/api/services/{sid}/c4/container", headers=A, json={"model": {"nodes": [], "edges": []}})
+    assert art()["diagram_code"] != ""
+    # идемпотентность: повторное сохранение той же модели не пишет в артефакт
+    r4 = client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": L1}).json()
+    assert r4["vision_synced"] is True and "C4Context" in r4["vision_code"]
+    r5 = client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": L1}).json()
+    assert r5["vision_synced"] is False and r5["vision_skipped"] == []
+    # валидация уважается и при автосохранении: L1 без нашего сервиса — записи нет (gate не слабее)
+    before = art()["diagram_code"]
+    r6 = client.put(f"/api/services/{sid}/c4/context", headers=A, json={"model": {
+        "nodes": [{"id": "x1", "type": "external", "name": "PayGate", "x": 1, "y": 1}], "edges": []}}).json()
+    assert r6["vision_synced"] is False
+    assert any("нет нашего сервиса" in s for s in r6["vision_skipped"])
+    assert art()["diagram_code"] == before          # невалидная модель не перезаписала исходник
+    # готовность к ревью видит синхронизированный исходник: C4-пункты больше не блокеры
+    d = client.get(f"/api/services/{sid}/readiness", headers=A).json()
+    assert not any("C4 System Context" in b for b in d["blockers"])
+    assert not any("C4 Container" in b for b in d["blockers"])
 
 
 def test_l1_l2_cascade_context(client, auth):

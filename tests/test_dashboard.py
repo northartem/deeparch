@@ -57,6 +57,9 @@ def test_readiness_lifecycle_mvp(client, auth):
 def test_my_tasks_permissions(client, auth):
     A, V, L = auth["admin"], auth["viewer"], auth["lead"]
     dash1 = next(s for s in client.get("/api/services", headers=A).json() if s["code"] == "DASH1")
+    # авто-gate готовности: карточка (name+owner+domain) должна быть заполнена
+    r = client.patch(f"/api/services/{dash1['id']}", headers=A, json={"domain": "Payments"})
+    assert r.status_code == 200, r.text
     rv = client.post(f"/api/services/{dash1['id']}/reviews", headers=A, json={"comment": "прошу ревью"})
     assert rv.status_code == 200, rv.text
     d2 = client.get("/api/dashboard", headers=A).json()
