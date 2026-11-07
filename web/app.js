@@ -671,9 +671,15 @@ function aiSection(title, cls, findings){
   const groupCard = g => g.items.length === 1 ? card(g.lead) : (() => {
     const lead = g.lead;
     const generic = lead.title.replace(/«[^»]+»/g, '«…»');
-    const list = g.items.map(f => f.artifact || f.artifact_kind
-      ? `<li><a class="lnk" href="${esc(f.target||'#')}">${esc(f.artifact || f.artifact_kind)}</a></li>`
-      : '').join('');
+    const list = g.items.map(f => {
+      const idx = AI_LAST ? AI_LAST.findings.indexOf(f) : -1;
+      const fix = (f.fix && idx >= 0 && AI_SID)
+        ? ` <button class="sec aireview-fixbtn" onclick="aiReviewFix(${AI_SID},${idx})"
+            title="AI подготовит черновик правки артефакта с учётом находки (advisory)">🔧 Исправить</button>` : '';
+      return f.artifact || f.artifact_kind
+        ? `<li><a class="lnk" href="${esc(f.target||'#')}">${esc(f.artifact || f.artifact_kind)}</a>${fix}</li>`
+        : '';
+    }).join('');
     return `<details class="aireview-item${lead.severity==='warning'?' aireview-warn':''}">
       <summary><b>${esc(AI_KIND[lead.kind]||lead.kind)}: ${esc(generic)}</b> <span class="mut">· ${g.items.length} артефактов</span></summary>
       ${lead.detail?`<div class="small" style="margin-top:4px">${esc(lead.detail)}</div>`:''}
