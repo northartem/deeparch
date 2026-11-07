@@ -857,14 +857,15 @@ const C4_TYPES = [
 const C4_TYPE = Object.fromEntries(C4_TYPES.map(x => [x.t, x]));
 const C4_W = 160, C4_H = 64;
 const C4_VIEWS = {context: 'Контекст (L1)', container: 'Контейнеры (L2)'};
-let DSGN = {sid: null, models: {}, view: 'context', sel: null, selType: null, linkFrom: null, saveT: null};
+let DSGN = {sid: null, models: {}, view: 'context', sel: null, selType: null, linkFrom: null, saveT: null, pending: null};
 
 const c4M = () => DSGN.models[DSGN.view];
 const c4Node = id => c4M() && (c4M().nodes || []).find(n => n.id === id);
 const c4Edge = id => c4M() && (c4M().edges || []).find(e => e.id === id);
 
 async function tabDesign(s){
-  DSGN.sid = s.id; DSGN.sel = null; DSGN.selType = null; DSGN.linkFrom = null;
+  c4FlushSave();                      // недосейвенный вид предыдущего сервиса уходит под своим {sid, view}
+  DSGN.sid = s.id; DSGN.sel = null; DSGN.selType = null; c4CancelLink();
   const r = await api(`/services/${s.id}/c4`).catch(() => ({models: {}}));
   DSGN.models = r.models || {};
   for(const v of Object.keys(C4_VIEWS))
@@ -919,7 +920,8 @@ async function tabDesign(s){
 }
 
 function c4SetView(v){
-  DSGN.view = v; DSGN.sel = null; DSGN.selType = null; DSGN.linkFrom = null;
+  c4FlushSave();                      // правки текущего вида сохраняются до переключения
+  DSGN.view = v; DSGN.sel = null; DSGN.selType = null; c4CancelLink();
   document.querySelectorAll('.c4-views button').forEach(b => b.classList.toggle('c4-vact', b.dataset.view === v));
   const btn = [...document.querySelectorAll('.card button')].find(b => b.textContent.includes('AI-структура'));
   if(btn) btn.setAttribute('onclick', `c4AI('${v}', this)`);
@@ -943,9 +945,9 @@ function c4Draw(){
     const p = trim(center(f), center(t));
     const selE = DSGN.selType === 'edge' && DSGN.sel === e.id;
     const lbl = esc(e.label || 'взаимодействует');
-    edges += `<line data-eid="${e.id}" x1="${p.a.x}" y1="${p.a.y}" x2="${p.b.x}" y2="${p.b.y}"
+    edges += `<line data-eid="${esc(e.id)}" x1="${p.a.x}" y1="${p.a.y}" x2="${p.b.x}" y2="${p.b.y}"
       stroke="${selE ? '#e11d48' : '#64748b'}" stroke-width="${selE ? 3 : 1.6}" marker-end="url(#c4-arrow)"/>
-      <line data-eid="${e.id}" x1="${p.a.x}" y1="${p.a.y}" x2="${p.b.x}" y2="${p.b.y}"
+      <line data-eid="${esc(e.id)}" x1="${p.a.x}" y1="${p.a.y}" x2="${p.b.x}" y2="${p.b.y}"
       stroke="transparent" stroke-width="12"/>
       <text x="${(p.a.x + p.b.x)/2}" y="${(p.a.y + p.b.y)/2 - 5}" text-anchor="middle"
       font-size="10.5" fill="#334155" style="paint-order:stroke" stroke="#f8fafc" stroke-width="4"
@@ -957,7 +959,7 @@ function c4Draw(){
     const selN = DSGN.selType === 'node' && DSGN.sel === n.id;
     const isLinkFrom = DSGN.linkFrom === n.id;
     const nm = n.name.length > 21 ? n.name.slice(0, 20) + '…' : n.name;
-    nodes += `<g data-nid="${n.id}" transform="translate(${n.x},${n.y})" style="cursor:grab">
+    nodes += `<g data-nid="${esc(n.id)}" transform="translate(${n.x},${n.y})" style="cursor:grab">
       <rect width="${C4_W}" height="${C4_H}" rx="10" fill="${ty.fill}"
         stroke="${selN || isLinkFrom ? '#e11d48' : ty.line}" stroke-width="${selN || isLinkFrom ? 3 : ty.t==='system'?2.4:1.6}"
         ${ty.dash ? `stroke-dasharray="${ty.dash}"` : ''}/>
@@ -980,12 +982,12 @@ function c4BindSvg(){
   const svg = document.getElementById('c4-svg'); if(!svg) return;
   svg.onmousedown = e => {
     const eg = e.target.closest('[data-eid]');
-    if(eg && !DSGN.linkFrom){
-      DSGN.sel = eg.dataset.eid; DSGN.selType = 'edge'; DSGN.linkFrom = null;
+    if(eg && !c4LinkOn()){          // в режиме связи клики по связям игнорируем — работаем с узлами
+      DSGN.sel = eg.dataset.eid; DSGN.selType = 'edge';
       c4Draw(); c4Props(); return;
     }
     const ng = e.target.closest('[data-nid]');
-    if(!ng){ DSGN.linkFrom = null; c4Draw(); c4Sel(null); return; }
+    if(!ng){ c4CancelLink(); c4Draw(); c4Sel(null); return; }
     const n = c4Node(ng.dataset.nid);
     const p = c4Point(e);
     C4DRAG = {id: n.id, sx: p.x, sy: p.y, ox: n.x, oy: n.y, moved: false};
@@ -1004,14 +1006,16 @@ function c4BindSvg(){
   svg.onmouseup = () => {
     if(C4DRAG && !C4DRAG.moved){
       const id = C4DRAG.id;
-      if(DSGN.linkFrom && DSGN.linkFrom !== id){
+      if(c4LinkOn() && !DSGN.linkFrom){          // первый клик — источник связи
+        DSGN.linkFrom = id; c4Draw(); c4Status();
+      } else if(DSGN.linkFrom && DSGN.linkFrom !== id){   // второй клик — цель: создаём связь
         const m = c4M();
         m.edges.push({id: 'e' + Date.now(), from: DSGN.linkFrom, to: id, label: '', tech: ''});
-        DSGN.linkFrom = null;
-        document.getElementById('c4-linkbtn').classList.remove('c4-vact');
-        c4Draw(); c4Status(); c4SaveSoon();
-      } else if(!DSGN.linkFrom){ c4Sel(id, 'node'); }
-      else { DSGN.linkFrom = null; c4Draw(); }
+        c4CancelLink();
+        c4Draw(); c4Props(); c4Status(); c4SaveSoon();
+      } else if(DSGN.linkFrom){                  // клик по самому источнику — отмена
+        c4CancelLink(); c4Draw(); c4Status();
+      } else { c4Sel(id, 'node'); }
     } else if(C4DRAG && C4DRAG.moved){ c4SaveSoon(); }
     C4DRAG = null;
   };
@@ -1021,8 +1025,11 @@ function c4BindSvg(){
 document.addEventListener('keydown', e => {
   if(!document.getElementById('c4-svg')) return;
   if(e.target.matches('input,textarea,select')) return;
-  if((e.key === 'Delete' || e.key === 'Backspace') && DSGN.sel){ e.preventDefault(); c4DeleteSel(); }
-  if(e.key === 'Escape'){ DSGN.linkFrom = null; c4Sel(null); c4Draw(); }
+  // удаление по клавише — только когда фокус на холсте или теле документа,
+  // а не на кнопках/ссылках (иначе Backspace «съедает» выбранный узел под модалкой)
+  const onCanvas = e.target === document.body || e.target.closest?.('#c4-svg');
+  if((e.key === 'Delete' || e.key === 'Backspace') && DSGN.sel && onCanvas){ e.preventDefault(); c4DeleteSel(); }
+  if(e.key === 'Escape'){ c4CancelLink(); c4Sel(null); c4Draw(); }
 });
 
 function c4Sel(id, type){
@@ -1038,11 +1045,14 @@ function c4Add(type){
   c4Sel(n.id, 'node'); c4Status(); c4SaveSoon();
 }
 
+const c4LinkOn = () => { const b = document.getElementById('c4-linkbtn'); return !!b && b.classList.contains('c4-vact'); };
+const c4CancelLink = () => { DSGN.linkFrom = null; const b = document.getElementById('c4-linkbtn'); if(b) b.classList.remove('c4-vact'); };
+
 function c4LinkMode(){
-  DSGN.linkFrom = null;
   const btn = document.getElementById('c4-linkbtn');
   const on = !btn.classList.contains('c4-vact');
   btn.classList.toggle('c4-vact', on);
+  DSGN.linkFrom = null;               // источник ещё не выбран — выбирается первым кликом по узлу
   if(on) toast('Режим связи: кликните <b>источник</b>, затем <b>цель</b> (Esc — отмена)');
   c4Status();
 }
@@ -1096,14 +1106,27 @@ function c4Status(note){
 
 function c4SaveSoon(){
   clearTimeout(DSGN.saveT);
-  DSGN.saveT = setTimeout(c4Save, 1200);
+  // снимок фиксируется сейчас: таймер обязан сохранить тот {sid, view, данные}, при которых
+  // была правка, а не те, что станут актуальными через 1.2 с (иначе правка молча теряется)
+  DSGN.pending = {sid: DSGN.sid, view: DSGN.view,
+                  model: JSON.parse(JSON.stringify({nodes: c4M().nodes, edges: c4M().edges}))};
+  DSGN.saveT = setTimeout(() => { DSGN.saveT = null; c4Save(); }, 1200);
 }
 
-async function c4Save(){
+function c4FlushSave(){
+  if(!DSGN.saveT) return;
+  clearTimeout(DSGN.saveT); DSGN.saveT = null;
+  const job = DSGN.pending; DSGN.pending = null;
+  if(job) c4Save(job);              // немедленный досейв под старым видом (при смене вида/таба)
+}
+
+async function c4Save(job){
+  const use = job || DSGN.pending;
+  if(!job) DSGN.pending = null;
+  if(!use) return;
   try{
-    const m = c4M();
-    await api(`/services/${DSGN.sid}/c4/${DSGN.view}`,
-      {method:'PUT', body: JSON.stringify({model: {nodes: m.nodes, edges: m.edges}})});
+    await api(`/services/${use.sid}/c4/${use.view}`,
+      {method:'PUT', body: JSON.stringify({model: use.model})});
     c4Status('сохранено');
   }catch(e){ toast(esc(e.message), true); }
 }

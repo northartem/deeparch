@@ -6,6 +6,7 @@
 кладёт исходники диаграмм в артефакт vision_c4 — self-check и «Диаграммы» видят их.
 """
 import json
+import math
 import re
 from .db import q, q1, exec, now
 from . import llm, ai
@@ -45,14 +46,30 @@ def load(service_id: int) -> dict:
     return out
 
 
+_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,40}")
+
+
+def _new_id(kind: str, n: int, taken: set) -> str:
+    """Свободный id вида n3/e7 (не повторяет уже занятые)."""
+    nid = f"{kind}{n}"
+    while nid in taken:
+        n += 1
+        nid = f"{kind}{n}"
+    return nid
+
+
 def normalize(model) -> dict:
-    """Приводит модель к каноническому виду (гасит мусор от LLM/старых версий)."""
+    """Приводит модель к каноническому виду (гасит мусор от LLM/старых версий).
+
+    id допускаются только [A-Za-z0-9_-]{1,40} — они попадают в SVG-атрибуты и в
+    Mermaid-алиасы; битые/дублирующиеся id переименовываются, узлы не теряются.
+    """
     m = model if isinstance(model, dict) else {}
     nodes, ids = [], set()
     for n in m.get("nodes") or []:
-        nid = str(n.get("id") or "") or f"n{len(nodes)+1}"
-        if nid in ids:
-            continue
+        nid = str(n.get("id") or "").strip()
+        if not _ID_RE.fullmatch(nid) or nid in ids:
+            nid = _new_id("n", len(nodes) + 1, ids)
         typ = n.get("type") if n.get("type") in _NODE_TYPES else "container"
         nodes.append({"id": nid, "type": typ,
                       "name": str(n.get("name") or "Без названия")[:80],
@@ -62,8 +79,10 @@ def normalize(model) -> dict:
         ids.add(nid)
     edges, eids = [], set()
     for e in m.get("edges") or []:
-        eid = str(e.get("id") or "") or f"e{len(edges)+1}"
-        if eid in eids or e.get("from") not in ids or e.get("to") not in ids:
+        eid = str(e.get("id") or "").strip()
+        if not _ID_RE.fullmatch(eid) or eid in eids:
+            eid = _new_id("e", len(edges) + 1, eids)
+        if e.get("from") not in ids or e.get("to") not in ids:
             continue
         edges.append({"id": eid, "from": e["from"], "to": e["to"],
                       "label": str(e.get("label") or "")[:80],
@@ -73,10 +92,13 @@ def normalize(model) -> dict:
 
 
 def _num(v, dflt):
+    """Координата: число или значение по умолчанию; NaN/inf недопустимы —
+    они ломают и JSON-ответ (ValueError при сериализации), и SVG (transform=translate(nan,…))."""
     try:
-        return float(v)
+        f = float(v)
     except (TypeError, ValueError):
         return dflt
+    return f if math.isfinite(f) else dflt
 
 
 def save(service_id: int, view: str, model: dict, user: str) -> dict:
@@ -98,20 +120,34 @@ def _alias(nid: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", nid) or "x"
 
 
+def _esc_mmd(s: str) -> str:
+    """Значение внутри кавычек Mermaid: кавычка → апостроф, перевод строки → разделитель
+    (иначе строковый литерал разрывается и экспорт перестаёт парситься)."""
+    return '"' + (s or "").replace("\r", " ").replace("\n", " · ").replace('"', "'") + '"'
+
+
 def gen_mermaid(model: dict, view: str) -> str:
     """Экспорт модели в исходник Mermaid C4 (единый источник правды — исходник, не картинка)."""
     m = normalize(model)
     lines = ["C4Context" if view == "context" else "C4Container",
              "title " + ("System Context (L1)" if view == "context" else "Container diagram (L2)")]
-    if view == "context":
-        allowed = {"person", "system", "external"}
-    else:
-        allowed = {"person", "external", "container", "db", "system"}
-    for n in m["nodes"]:
-        if n["type"] not in allowed:
-            continue
-        esc = lambda s: '"' + (s or "").replace('"', "'") + '"'
-        a, name, desc, tech = _alias(n["id"]), esc(n["name"]), esc(n["desc"]), n["tech"] or "Технология"
+    allowed = ({"person", "system", "external"} if view == "context"
+               else {"person", "external", "container", "db", "system"})
+    shown = [n for n in m["nodes"] if n["type"] in allowed]
+    # алиасы уникальны: разные id ('u-1' и 'u_1') не должны склеиться в один элемент диаграммы
+    aliases, used = {}, set()
+    for n in shown:
+        base = _alias(n["id"])
+        if base[0].isdigit():
+            base = "n" + base
+        a, k = base, 2
+        while a in used:
+            a = f"{base}_{k}"
+            k += 1
+        used.add(a)
+        aliases[n["id"]] = a
+    for n in shown:
+        a, name, desc, tech = aliases[n["id"]], _esc_mmd(n["name"]), _esc_mmd(n["desc"]), n["tech"] or "Технология"
         if n["type"] == "person":
             lines.append(f"Person({a}, {name}, {desc})")
         elif n["type"] == "system":
@@ -119,20 +155,19 @@ def gen_mermaid(model: dict, view: str) -> str:
         elif n["type"] == "external":
             lines.append(f"System_Ext({a}, {name}, {desc})")
         elif n["type"] == "db":
-            lines.append(f"ContainerDb({a}, {name}, {esc(tech)}, {desc})")
+            lines.append(f"ContainerDb({a}, {name}, {_esc_mmd(tech)}, {desc})")
         else:
-            lines.append(f"Container({a}, {name}, {esc(tech)}, {desc})")
-    present = {_alias(n["id"]) for n in m["nodes"] if n["type"] in allowed}
+            lines.append(f"Container({a}, {name}, {_esc_mmd(tech)}, {desc})")
     seen = set()
     for e in m["edges"]:
-        key = (_alias(e["from"]), _alias(e["to"]))
-        if key[0] not in present or key[1] not in present:
+        if e["from"] not in aliases or e["to"] not in aliases:
             continue
-        if key in seen or (key[1], key[0]) in seen:
-            continue
+        key = (aliases[e["from"]], aliases[e["to"]])
+        if key in seen:
+            continue   # дубликат той же связи; обратная (B→A) — отдельная связь и сохраняется
         seen.add(key)
-        tech = f', {esc(e["tech"])}' if e["tech"] else ""
-        lines.append(f'Rel({key[0]}, {key[1]}, {esc(e["label"] or "взаимодействует")}{tech})')
+        tech = f', {_esc_mmd(e["tech"])}' if e["tech"] else ""
+        lines.append(f'Rel({key[0]}, {key[1]}, {_esc_mmd(e["label"] or "взаимодействует")}{tech})')
     return "\n".join(lines)
 
 
