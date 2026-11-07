@@ -197,7 +197,8 @@ async function createService(){
 }
 
 /* ---------- service detail ---------- */
-const TABS = [['card','Карточка'],['artifacts','Артефакты (7)'],['diagrams','Диаграммы'],['check','Self-check'],['review','Ревью'],['components','Компоненты']]; // базовый список (полный собирается в viewService)
+const ARTIFACT_TAB = () => ['artifacts','Артефакты' + (S.standard ? ` (${S.standard.artifacts.length})` : '')]; // число видов артефактов — из стандарта, не хардкод
+const TABS = [['card','Карточка'],ARTIFACT_TAB(),['diagrams','Диаграммы'],['check','Self-check'],['review','Ревью'],['components','Компоненты']]; // базовый список (полный собирается в viewService)
 let SERVICE = null;
 async function viewService(id, tab='card'){
   const s = await api('/services/'+id); SERVICE = s;
@@ -205,7 +206,7 @@ async function viewService(id, tab='card'){
   const tabs = [['card','Карточка'],
     ['reqs', 'Требования' + (s.requirements?.length ? ` (${s.requirements.length})` : '')],
     ['design', 'Проектирование'],
-    ['artifacts','Артефакты (7)'],['diagrams','Диаграммы'],['check','Self-check'],['review','Ревью'],['components','Компоненты'],
+    ARTIFACT_TAB(),['diagrams','Диаграммы'],['check','Self-check'],['review','Ревью'],['components','Компоненты'],
     ['debt', 'Техдолг'+(s.debts.length?` (${s.debts.length})`:'')],
     ['fitness', 'Fitness'], ['nfr', 'NFR']];
   $('#view').innerHTML = `
