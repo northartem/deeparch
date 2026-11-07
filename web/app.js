@@ -622,6 +622,7 @@ async function svcReadiness(sid){
 }
 /* ---------- AI-ревью до отправки (advisory, BR-33) ---------- */
 let AI_LAST = null;      // последний прогон для текущего сервиса (кэш вердикта между async-рендерами)
+let AI_SID = null;       // сервис текущего прогона (кнопки «Исправить» должны знать цель)
 const AI_KIND = {противоречие:'Противоречие', риск:'Риск', пробел:'Не хватает', несоответствие:'Расхождение'};
 function paintAiVerdict(){
   /* Вердикт AI-ревью живёт в строке рядом с гейтом готовности — один сводный статус */
@@ -652,13 +653,20 @@ function aiSection(title, cls, findings){
     const art = esc(f.artifact || f.artifact_kind || '');
     const aiTag = f.layer==='llm' ? ` <span class="aireview-ai">AI-анализ</span>` : '';
     const stdTag = f.std ? ` <span class="aireview-std" title="Пункт корпоративного стандарта">📖 ${esc(f.std)}</span>` : '';
+    const idx = AI_LAST ? AI_LAST.findings.indexOf(f) : -1;
+    const fixAct = (f.fix && idx >= 0 && AI_SID) ? `<div class="aireview-act">
+      <button class="sec aireview-fixbtn" onclick="aiReviewFix(${AI_SID},${idx})"
+        title="AI подготовит черновик правки артефакта с учётом находки — примените после проверки (advisory)">🔧 Исправить</button>
+      ${f.target?`<a class="lnk small" href="${esc(f.target)}">Перейти →</a>`:''}</div>` : '';
     const inner = `<b>${kind}${art?` · ${art}`:''}: ${esc(f.title)}</b>${aiTag}${stdTag}
       ${f.detail?`<div class="small">${esc(f.detail)}</div>`:''}
       ${f.evidence?`<div class="small mut">Доказательство: ${esc(f.evidence)}</div>`:''}`;
     const cls2 = `aireview-item${f.severity==='warning'?' aireview-warn':''}`;
-    return f.target
-      ? `<a class="${cls2} lnk" href="${esc(f.target)}">${inner}</a>`
-      : `<div class="${cls2}">${inner}</div>`;
+    return (f.fix && idx >= 0 && AI_SID)
+      ? `<div class="${cls2}">${inner}${fixAct}</div>`
+      : f.target
+        ? `<a class="${cls2} lnk" href="${esc(f.target)}">${inner}</a>`
+        : `<div class="${cls2}">${inner}</div>`;
   };
   const groupCard = g => g.items.length === 1 ? card(g.lead) : (() => {
     const lead = g.lead;
@@ -683,6 +691,7 @@ function renderAiReview(el, r){
   const info = r.findings.filter(f=>f.severity!=='warning');
   const dyn = r.previous ? ` · прошлый прогон: ${r.previous.total} → ${r.findings.length} находок` : '';
   el.innerHTML = `
+    <div id="svc-aireview-fix"></div>
     ${r.note?`<p class="small mut" style="margin:0 0 8px">${esc(r.note)}</p>`:''}
     ${aiSection(`⚠ Серьёзные — ${warn.length}`, 'aireview-h-warn', warn)}
     ${aiSection(`ℹ️ Замечания — ${info.length}`, 'aireview-h-info', info)}
@@ -691,7 +700,7 @@ function renderAiReview(el, r){
     Advisory (BR-33): находки — рекомендации, отправку не блокируют.</p>`;
 }
 async function svcAiReviewLoad(sid){
-  AI_LAST = null; paintAiVerdict();       // чужой вердикт не переживает смену сервиса
+  AI_LAST = null; AI_SID = sid; paintAiVerdict();   // чужой вердикт не переживает смену сервиса
   const el = document.getElementById('svc-aireview'); if(!el) return;
   try{
     const r = await api(`/services/${sid}/ai-review`);
@@ -714,6 +723,46 @@ async function aiReview(sid){
                : 'AI-ревью: серьёзных находок нет');
   }catch(e){ toast(esc(e.message), true); }
   if(btn){ btn.disabled = false; btn.textContent = '🧠 AI-ревью'; }
+}
+async function aiReviewFix(sid, idx){
+  const f = ((AI_LAST||{}).findings||[])[idx]; if(!f) return;
+  const slot = document.getElementById('svc-aireview-fix'); if(!slot) return;
+  slot.innerHTML = `<div class="aireview-fixbox"><p class="small mut">⏳ Готовлю предложение исправления (LLM, до ~1 мин)…</p></div>`;
+  try{
+    const r = await api(`/services/${sid}/ai-review/fix`, {method:'POST', body: JSON.stringify({
+      kind:f.kind, artifact_kind:f.artifact_kind, title:f.title, detail:f.detail,
+      std:f.std||'', severity:f.severity, layer:f.layer||''})});
+    if(!slot.isConnected) return;   // вкладка сменилась за время LLM
+    const before = r.before||{}, after = r.after||{};
+    slot.innerHTML = `
+      <div class="aireview-fixbox">
+        <div class="aireview-h aireview-h-info">🔧 Предложение исправления · ${esc(r.artifact||r.artifact_kind||'')}</div>
+        <p class="small mut" style="margin:4px 0 8px">${esc(r.note||'')} Advisory (BR-33): правка применяется только после вашего подтверждения, ничего не сохраняется до кнопки «Применить».</p>
+        <label class="small"><b>Новый текст артефакта</b> (можно отредактировать перед применением):</label>
+        <textarea id="aifix-content" class="aifix-ta">${esc(after.content_md||'')}</textarea>
+        ${after.diagram_code?`<label class="small"><b>Mermaid-диаграмма:</b></label>
+        <textarea id="aifix-diagram" class="aifix-ta">${esc(after.diagram_code)}</textarea>`:''}
+        ${before.content_md?`<details class="small" style="margin:4px 0 0"><summary>Текущий текст артефакта (до правки)</summary><pre class="aifix-pre">${esc(before.content_md)}</pre></details>`:''}
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="pri" onclick="aiReviewFixApply(${sid},'${esc(r.artifact_kind)}')">✓ Применить</button>
+          <button class="sec" onclick="aiReviewFixCancel()">✕ Отмена</button>
+        </div>
+      </div>`;
+    toast('Предложение готово — проверьте, при необходимости отредактируйте и примените');
+  }catch(e){ slot.innerHTML = `<div class="aireview-fixbox"><p class="small">Не удалось подготовить предложение: ${esc(e.message)}</p></div>`; }
+}
+async function aiReviewFixApply(sid, kind){
+  const content = document.getElementById('aifix-content'); if(!content) return;
+  const diag = document.getElementById('aifix-diagram');
+  try{
+    await api(`/services/${sid}/artifacts/${kind}`, {method:'PUT', body: JSON.stringify(
+      diag ? {content_md: content.value, diagram_code: diag.value} : {content_md: content.value})});
+    toast('Исправление применено — перепрогоните 🧠 AI-ревью, чтобы обновить находки');
+    aiReviewFixCancel();
+  }catch(e){ toast(esc(e.message), true); }
+}
+function aiReviewFixCancel(){
+  const s = document.getElementById('svc-aireview-fix'); if(s) s.innerHTML = '';
 }
 async function requestReview(sid){
   if(SERVICE && SERVICE.id===sid && SERVICE.review_status==='approved'

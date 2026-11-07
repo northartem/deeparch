@@ -414,3 +414,11 @@ details.aireview-item > *:not(summary){padding:0 12px 9px}
   border-radius:6px;padding:1px 7px;margin-left:6px;vertical-align:1px}
 .aireview-std{display:inline-block;font-size:11px;color:#57534e;background:var(--surface2);
   border:1px solid var(--line);border-radius:6px;padding:1px 7px;margin-left:6px;vertical-align:1px}
+.aireview-act{display:flex;gap:12px;align-items:center;margin-top:8px}
+.aireview-fixbtn{font-size:12px;padding:3px 12px}
+.aireview-fixbox{border:1px solid var(--line);border-left:3px solid #4338ca;border-radius:10px;
+  background:var(--surface);padding:10px 14px;margin:0 0 12px}
+.aifix-ta{width:100%;min-height:180px;font-family:ui-monospace,monospace;font-size:12px;
+  border:1px solid var(--line);border-radius:8px;padding:8px;margin:4px 0 8px;resize:vertical;background:var(--surface2)}
+.aifix-pre{white-space:pre-wrap;max-height:220px;overflow:auto;border:1px solid var(--line);
+  border-radius:8px;padding:8px;background:var(--surface2);margin:6px 0 0}

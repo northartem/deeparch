@@ -14,6 +14,7 @@ Use case: автор (team_lead) прогоняет ревью перед отп
 import json
 import re
 
+from . import ai as ai_gen
 from . import c4 as c4mod
 from . import llm, nfr, reqs
 from .db import exec, now, q, q1
@@ -72,6 +73,64 @@ def _std_ref(raw) -> str | None:
 
 def _filled(a) -> bool:
     return bool(a and ((a["content_md"] or "").strip() or (a["diagram_code"] or "").strip()))
+
+
+_FIX_DRAFT_KINDS = ("threat_model", "drp_bcp")
+
+
+def _placeholder(text) -> bool:
+    """Шаблон/заготовка вместо содержания: маркеры [TODO] из скелетов и черновиков."""
+    t = (text or "").strip()
+    return "[TODO" in t
+
+
+def _fix_strategy(service_id: int, artifact_kind) -> str | None:
+    """Какую правку можно предложить автоматически для находки этого артефакта.
+
+    MVP — только надёжные типы: NFR profile собирается из НФТ-требований (цифры
+    уже есть в «Требованиях»), пустые/шаблонные Threat Model и DRP/BCP — AI-черновик
+    с акцентом на находку. Остальное (Vision, ADR, C4, Deployment) — решение
+    за автором: кнопки «Исправить» у находки не будет.
+    """
+    if artifact_kind == "nfr_security":
+        return "nfr" if reqs.nonfunc_items(service_id) else None
+    if artifact_kind in _FIX_DRAFT_KINDS:
+        a = q1("SELECT content_md, diagram_code FROM artifacts WHERE service_id=? AND kind=?",
+               (service_id, artifact_kind))
+        return "draft" if (not _filled(a) or _placeholder(a["content_md"])) else None
+    return None
+
+
+def propose_fix(service_id: int, finding: dict, model: str = "") -> dict | None:
+    """Предложение исправления по находке AI-ревью (advisory, BR-33).
+
+    Готовит черновик правки артефакта с учётом находки, но ничего не сохраняет:
+    автор смотрит предпросмотр и применяет осознанно (existing PUT artifacts).
+    None — находка не исправима автоматически.
+    """
+    kind = finding.get("artifact_kind")
+    strategy = _fix_strategy(service_id, kind)
+    if not strategy:
+        return None
+    a = q1("SELECT content_md, diagram_code FROM artifacts WHERE service_id=? AND kind=?",
+           (service_id, kind))
+    before = {"content_md": (a["content_md"] or "") if a else "",
+              "diagram_code": (a["diagram_code"] or "") if a else ""}
+    if strategy == "nfr":
+        r = reqs.nfr_from_requirements(service_id, model=model)
+        if not r:
+            return None
+        after = {"content_md": r["content_md"], "diagram_code": ""}
+    else:
+        focus = " · ".join(x for x in (finding.get("title"), finding.get("std")) if x)
+        r = ai_gen.draft_artifact(service_id, kind, model=model, focus=focus)
+        if not r:
+            return None
+        after = {"content_md": r["content_md"], "diagram_code": r.get("diagram_code") or ""}
+    return {"strategy": strategy, "artifact_kind": kind, "artifact": _TITLES.get(kind, kind),
+            "before": before, "after": after,
+            "provider": r["provider"], "model": r.get("model"), "note": r["note"],
+            "finding": {"title": finding.get("title"), "std": finding.get("std")}}
 
 
 def formal_findings(svc) -> list[dict]:
@@ -294,6 +353,9 @@ def run(service_id: int, created_by: str, model: str = "") -> dict | None:
     formal = formal_findings(svc)
     llm_res = llm_findings(service_id, model=model)
     findings = formal + llm_res["findings"]
+    for f in findings:      # разметка исправимости: стратегия авто-правки или None
+        f["fix"] = (_fix_strategy(service_id, f["artifact_kind"])
+                    if f.get("artifact_kind") else None)
     prev = q1("SELECT id, formal_count, llm_count, created_at FROM ai_review_runs "
               "WHERE service_id=? ORDER BY id DESC LIMIT 1", (service_id,))
     ts = now()

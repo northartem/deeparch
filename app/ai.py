@@ -164,9 +164,10 @@ def draft_diagram(service_id: int, kind: str, model: str = "", svc=None) -> str 
         return skeleton
 
 
-def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
+def draft_artifact(service_id: int, kind: str, model: str = "", focus: str = "") -> dict:
     """AI-черновик артефакта (BR-28): живой AI-Buddy по контексту сервиса и KB стандарта,
     при недоступности LLM — детерминированный шаблон (fallback).
+    focus — акцент из находки AI-ревью (кнопка «Исправить»): LLM прорабатывает её.
     Текст и диаграмма генерируются параллельно (два вызова LLM ~30 с вместо ~60 с последовательно)."""
     svc = q1("SELECT * FROM services WHERE id=?", (service_id,))
     art = next((a for a in ARTIFACT_KINDS if a["kind"] == kind), None)
@@ -190,7 +191,9 @@ def draft_artifact(service_id: int, kind: str, model: str = "") -> dict:
                    f"- Шаблон стандарта: {art['template_ref']}\n\n"
                    f"Требования стандарта (KB):\n{std_ctx}\n\n"
                    f"Факты о сервисе:\n{_service_facts(service_id)}\n\n"
-                   f"Составь черновик артефакта «{art['title']}» для сервиса {svc['code']}.")
+                   + (f"Особый акцент (замечание AI-ревью — обязательно проработать):\n"
+                      f"{focus.strip()}\n\n" if (focus or "").strip() else "")
+                   + f"Составь черновик артефакта «{art['title']}» для сервиса {svc['code']}.")
     try:
         diag = None
         with ThreadPoolExecutor(max_workers=2) as ex:

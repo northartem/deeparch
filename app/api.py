@@ -450,6 +450,31 @@ def ai_review_last(sid: int, user=Depends(current_user)):
     return ai_review.last(sid)
 
 
+@router.post("/services/{sid}/ai-review/fix")
+def ai_review_fix(sid: int, body=Body(default={}), user=Depends(current_user)):
+    """Предложение исправления по находке AI-ревью (advisory, BR-33).
+
+    Только надёжные типы: NFR profile из НФТ-требований, AI-черновик пустых/
+    шаблонных Threat Model и DRP/BCP (с акцентом на находку). Ничего не
+    сохраняет — автор смотрит предпросмотр и применяет через PUT artifacts.
+    """
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    finding = {}
+    for k in ("kind", "artifact_kind", "title", "detail", "std", "severity", "layer"):
+        v = body.get(k)
+        finding[k] = v.strip() if isinstance(v, str) else v
+    r = ai_review.propose_fix(sid, finding, model=(body.get("model") or "").strip())
+    if not r:
+        raise HTTPException(400, "Эту находку нельзя исправить автоматически — правка за автором")
+    audit(user, "ai_review_fix", f"service:{svc['code']}/{r['artifact_kind']}",
+          f"strategy={r['strategy']} provider={r['provider']}")
+    return r
+
+
 # ---------- каталог переиспользуемых компонентов (BR-14…19) ----------
 
 @router.get("/components")
