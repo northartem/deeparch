@@ -642,16 +642,22 @@ def c4_put(sid: int, view: str, body=Body(...), user=Depends(current_user)):
         norm = c4mod.save(sid, view, body.get("model") or {}, user["username"])
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
-    # JSON-модель — источник правды: Mermaid-исходник в артефакте Vision перегенерируется
-    # автоматически; при блокирующих проблемах модели запись не выполняется (gate не слабее)
-    vs = c4mod.sync_vision(sid)
-    note = (" vision:synced" if vs["synced"]
-            else (" vision:skipped: " + "; ".join(vs["skipped"]) if vs["skipped"] else ""))
+    # JSON-модель — источник правды: Mermaid-исходник в артефакте перегенерируется
+    # автоматически (L1/L2 → vision_c4, ER → data_model); при блокирующих проблемах
+    # модели запись не выполняется (gate не слабее)
+    if view == "er":
+        vs = c4mod.sync_data_model(sid)
+        key = "dm"
+    else:
+        vs = c4mod.sync_vision(sid)
+        key = "vision"
+    note = (f" {key}:synced" if vs["synced"]
+            else (f" {key}:skipped: " + "; ".join(vs["skipped"]) if vs["skipped"] else ""))
     audit(user, "c4_save", f"service:{sid}/{view}",
           f"nodes:{len(norm['nodes'])} edges:{len(norm['edges'])}" + note)
-    return {"ok": True, "model": norm, "vision_synced": vs["synced"],
-            "vision_skipped": vs["skipped"],
-            **({"vision_code": vs["code"]} if vs["synced"] else {})}
+    return {"ok": True, "model": norm, f"{key}_synced": vs["synced"],
+            f"{key}_skipped": vs["skipped"],
+            **({f"{key}_code": vs["code"]} if vs["synced"] else {})}
 
 
 @router.post("/services/{sid}/c4/{view}/ai")
