@@ -1,10 +1,11 @@
 """
-AI-адаптер (BR-27, BR-28, BR-29).
+AI-адаптер (BR-27, BR-28).
 
 MVP: provider="mock" — детерминированные эвристики без внешней LLM.
 В проде сюда подключается клиент корпоративной платформы AI-Buddy
 (см. Confluence: "SDLC Агент соответствия архитектурным стандартам" pageId=915912563).
 Все результаты advisory-only, с evidence-ссылками (BR-32), решение за человеком (BR-33).
+AI Gate (BR-29) упразднён 2026-11-07: формальный слой модуля ai_review его поглощает.
 """
 import json
 import re
@@ -13,9 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from . import llm, reqs
 from .db import q, q1
 from .kb import retrieve
-from .standards import ARTIFACT_KINDS, CHECKLIST_ITEMS, PROJECT_TYPES
-
-MIN_CONTENT = 200  # эвристика: артефакт содержательнее 200 символов
+from .standards import ARTIFACT_KINDS, PROJECT_TYPES
 
 # Виды, у которых AI-черновик генерирует и Mermaid-исходник диаграммы (решение 2026-11-07:
 # deployment и data_model — «пересказ реальности», где AI-черновик лучше пустого холста;
@@ -44,36 +43,6 @@ DRAFT_SYSTEM = """Ты архитектурный ассистент компа�
 
 def _artifact(service_id, kind):
     return q1("SELECT * FROM artifacts WHERE service_id=? AND kind=?", (service_id, kind))
-
-
-def predict_checklist(service_id: int):
-    """AI Gate (BR-29): предсказывает Е/Ч/Н по чек-листу на основе фактического наполнения артефактов."""
-    svc = q1("SELECT * FROM services WHERE id=?", (service_id,))
-    if not svc:
-        return None
-    predictions, issues = [], []
-    for it in CHECKLIST_ITEMS:
-        grade, evidence = "N", None
-        if it["artifact"] is None:  # пункт 10 — карточка сервиса
-            filled = all([svc["owner"], svc["domain"], svc["name"]])
-            grade, evidence = ("E", f"Карточка: владелец={svc['owner']}, домен={svc['domain']}") if filled else ("N", "Карточка заполнена не полностью")
-        else:
-            a = _artifact(service_id, it["artifact"])
-            if a and a["content_md"] and len(a["content_md"]) >= MIN_CONTENT:
-                grade = "E"
-                if a["source_url"]:
-                    evidence = f"Артефакт «{it['artifact']}», исх.: {a['source_url']}"
-                else:
-                    grade = "Ch"
-                    evidence = f"Артефакт «{it['artifact']}» заполнен, но нет ссылки на исходник"
-            else:
-                evidence = f"Артефакт «{it['artifact']}» пуст или слишком краток"
-        if it["weight"] == "mandatory" and grade != "E":
-            issues.append({"severity": "blocking" if grade == "N" else "warning",
-                           "item": it["item"], "hint": evidence})
-        predictions.append({"item_id": it["id"], "item": it["item"], "predicted": grade, "evidence": evidence})
-    return {"service_id": service_id, "provider": "mock", "mode": "advisory",
-            "predictions": predictions, "issues": issues}
 
 
 def _service_facts(service_id: int, max_art: int = 400) -> str:

@@ -227,6 +227,17 @@ CREATE TABLE IF NOT EXISTS nfr_metrics (     -- MVP2 BR-51…53: цели vs ф�
   UNIQUE(service_id, metric)
 );
 
+CREATE TABLE IF NOT EXISTS ai_review_runs (  -- AI-ревью до отправки (advisory, BR-33)
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  service_id INTEGER NOT NULL REFERENCES services(id),
+  findings TEXT NOT NULL,                -- JSON: [{severity,layer,kind,artifact_kind,title,detail,evidence,target}]
+  formal_count INTEGER NOT NULL DEFAULT 0,   -- находок формального слоя (без LLM)
+  llm_count INTEGER NOT NULL DEFAULT 0,      -- находок LLM-слоя
+  provider TEXT,                         -- ai-buddy / none / fallback
+  model TEXT,
+  created_by TEXT, created_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts REAL, user TEXT, action TEXT, entity TEXT, detail TEXT

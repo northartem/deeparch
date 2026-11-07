@@ -6,7 +6,7 @@ import secrets
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
-from . import ai, factory, fitness, integrations, kb, llm, nfr, reqs
+from . import ai, ai_review, factory, fitness, integrations, kb, llm, nfr, reqs
 from . import c4 as c4mod
 from .auth import current_user, verify_password
 from .db import exec, get_conn, now, q, q1
@@ -276,6 +276,7 @@ def update_service(sid: int, body=Body(...), user=Depends(current_user)):
 _SERVICE_CHILD_TABLES = (
     "artifacts", "c4_models", "checklist_runs", "fitness_runs", "nfr_metrics",
     "requirements", "reviews", "service_components", "service_grants", "tech_debts",
+    "ai_review_runs",
 )
 
 
@@ -420,6 +421,33 @@ def decide_review(rid: int, body=Body(...), user=Depends(current_user)):
     svc = q1("SELECT code FROM services WHERE id=?", (rv["service_id"],))
     audit(user, "review_decision", f"service:{svc['code']}", f"review#{rid} → {verdict}")
     return {"ok": True, "verdict": verdict}
+
+
+# ---------- AI-ревью до отправки (advisory, BR-33) ----------
+
+@router.post("/services/{sid}/ai-review")
+def ai_review_run(sid: int, body=Body(default={}), user=Depends(current_user)):
+    """Двухслойное AI-ревью пакета: формальные проверки + содержательный LLM-проход.
+    Advisory: находки не блокируют отправку (BR-33)."""
+    svc = q1("SELECT * FROM services WHERE id=?", (sid,))
+    if not svc:
+        raise HTTPException(404, "Сервис не найден")
+    if not can_edit_service(user, svc):
+        raise HTTPException(403, "Нет прав на этот сервис")
+    r = ai_review.run(sid, created_by=user["username"], model=(body.get("model") or "").strip())
+    if not r:   # сервис удалён между проверкой и прогоном (TOCTOU)
+        raise HTTPException(404, "Сервис не найден")
+    serious = sum(1 for f in r["findings"] if f["severity"] == "warning")
+    audit(user, "ai_review", f"service:{svc['code']}",
+          f"formal={r['formal_count']} llm={r['llm_count']} serious={serious} provider={r['provider']}")
+    return r
+
+
+@router.get("/services/{sid}/ai-review")
+def ai_review_last(sid: int, user=Depends(current_user)):
+    if not q1("SELECT id FROM services WHERE id=?", (sid,)):
+        raise HTTPException(404, "Сервис не найден")
+    return ai_review.last(sid)
 
 
 # ---------- каталог переиспользуемых компонентов (BR-14…19) ----------
@@ -700,12 +728,11 @@ def c4_export(sid: int, body=Body(None), user=Depends(current_user)):
 
 
 @router.post("/ai/precheck")
-def ai_precheck(body=Body(...), user=Depends(current_user)):
-    r = ai.predict_checklist(body.get("service_id"))
-    if not r:
-        raise HTTPException(404, "Сервис не найден")
-    audit(user, "ai_precheck", f"service:{body.get('service_id')}", "mock")
-    return r
+def ai_precheck(user=Depends(current_user)):
+    """Deprecated: AI Gate (mock-эвристика predict_checklist) поглощён AI-ревью —
+    формальный слой нового механизма покрывает те же проверки."""
+    raise HTTPException(410, "AI Gate упразднён: используйте POST /api/services/{id}/ai-review "
+                             "(двухслойное AI-ревью до отправки, advisory BR-33)")
 
 
 # ---------- интеграции с каталогом/CMDB (BR-20…23) ----------
@@ -739,7 +766,8 @@ _ACTION_LABELS = {
     "save_artifact": "Обновлён артефакт", "artifacts_scaffold": "Заполнены скелеты артефактов",
     "c4_save": "Сохранена C4-модель", "c4_export": "Экспорт C4 в артефакт",
     "c4_export_blocked": "Экспорт C4 заблокирован валидацией",
-    "self_check": "Пройден self-check", "ai_precheck": "AI-предпроверка self-check",
+    "self_check": "Пройден self-check", "ai_review": "AI-ревью пакета",
+    "ai_precheck": "AI-предпроверка self-check (упразднена)",
     "ai_draft": "AI-черновик артефакта", "ai_service_extract": "Извлечение карточки из документа",
     "requirement_add": "Добавлено требование", "requirement_update": "Изменено требование",
     "requirement_delete": "Удалено требование", "requirements_parse": "Разобран документ требований",
